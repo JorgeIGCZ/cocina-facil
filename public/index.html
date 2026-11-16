@@ -16,17 +16,16 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <div id="app"></div>
-  <nav id="tabs" hidden>
+  <main id="app"></main>
+  <nav id="tabs" aria-label="Secciones de Mi Cocina" hidden>
     <button data-tab="semana"><span>🗓️</span>Semana</button>
     <button data-tab="platillos"><span>📖</span>Platillos</button>
     <button data-tab="refri"><span>🧊</span>Refri</button>
     <button data-tab="super"><span>🛒</span>Súper</button>
     <button data-tab="mas"><span>⚙️</span>Más</button>
   </nav>
-  <div id="sheet-fondo" hidden></div>
-  <section id="sheet" hidden role="dialog" aria-modal="true"></section>
-  <div id="toast" hidden></div>
+  <dialog id="sheet" aria-labelledby="sheet-titulo"></dialog>
+  <div id="toast" role="status"></div>
   <script src="/app.js" type="module"></script>
 </body>
 </html>

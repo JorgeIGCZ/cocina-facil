@@ -11,6 +11,7 @@ const fecha = { type: 'string', format: 'date', description: 'AAAA-MM-DD' };
 const comida = { type: 'string', enum: COMIDAS };
 const lista = { type: 'array', items: { type: 'string' } };
 const estrellas = { type: 'object', additionalProperties: { type: 'integer', minimum: 0, maximum: 5 }, description: '{"Mamá": 5, "Niño 1": 3}' };
+const enteroNatural = { type: 'integer', minimum: 0 };
 
 export function openapi(servidor) {
   return {
@@ -30,21 +31,23 @@ export function openapi(servidor) {
       },
       '/api/personas/{id}': { patch: op('Editar persona (activo=false para quitarla)', { parameters: [p('id', 'Id')], requestBody: body({ nombre: { type: 'string' }, emoji: { type: 'string' }, rol: { type: 'string' }, activo: { type: 'boolean' } }) }) },
       '/api/platillos': {
-        get: op('Listar/buscar platillos con puntaje y frecuencia', { parameters: [q('texto', 'Nombre o ingrediente'), q('tipo', 'desayuno|comida|cena'), q('categoria', 'pollo, res, cerdo…')] }),
-        post: op('Agregar platillo', { requestBody: body({ nombre: { type: 'string' }, tipos: { type: 'array', items: comida }, categoria: { type: 'string' }, tiempo: { type: 'string', enum: Object.keys(TIEMPOS) }, ingredientes: lista, guarniciones: lista, etiquetas: lista, notas: { type: 'string' } }, ['nombre']) }),
+        get: op('Listar/buscar platillos con puntaje y frecuencia', { parameters: [q('texto', 'Nombre o ingrediente'), q('tipo', 'desayuno|comida|cena'), q('categoria', 'pollo, res, cerdo…'), q('archivados', 'Incluir los archivados', { type: 'boolean' })] }),
+        post: op('Agregar platillo', { requestBody: body({ nombre: { type: 'string' }, tipos: { type: 'array', items: comida }, categoria: { type: 'string' }, tiempo: { type: 'string', enum: Object.keys(TIEMPOS) }, ingredientes: lista, guarniciones: lista, etiquetas: lista, notas: { type: 'string' }, vecesPrevias: enteroNatural, calificaciones: estrellas }, ['nombre']) }),
       },
       '/api/platillos/{ref}': {
         get: op('Ver platillo', { parameters: [p('ref', 'Id o nombre')] }),
-        patch: op('Editar platillo', { parameters: [p('ref', 'Id o nombre')], requestBody: body({ nombre: { type: 'string' }, tipos: lista, categoria: { type: 'string' }, tiempo: { type: 'string' }, ingredientes: lista, guarniciones: lista, etiquetas: lista, notas: { type: 'string' } }) }),
-        delete: op('Borrar platillo', { parameters: [p('ref', 'Id o nombre')] }),
+        patch: op('Editar platillo', { parameters: [p('ref', 'Id o nombre')], requestBody: body({ nombre: { type: 'string' }, tipos: lista, categoria: { type: 'string' }, tiempo: { type: 'string' }, ingredientes: lista, guarniciones: lista, etiquetas: lista, notas: { type: 'string' }, vecesPrevias: enteroNatural, calificaciones: estrellas }) }),
+        delete: op('Archivar platillo conservando plan e historial', { parameters: [p('ref', 'Id o nombre')] }),
       },
+      '/api/platillos/{ref}/usos-futuros': { get: op('Consultar comidas futuras con el platillo', { parameters: [p('ref', 'Id o nombre')] }) },
+      '/api/platillos/{ref}/restaurar': { post: op('Restaurar platillo archivado', { parameters: [p('ref', 'Id o nombre')] }) },
       '/api/platillos/{ref}/calificar': { post: op('Calificar con estrellas por persona', { parameters: [p('ref', 'Id o nombre')], requestBody: body({ estrellas }, ['estrellas']) }) },
       '/api/semana': { get: op('Plan de la semana', { parameters: [q('fecha', 'Cualquier día de la semana', fecha)] }) },
       '/api/semana/armar': { post: op('Llenar la semana con sugerencias', { requestBody: body({ fecha, reemplazar: { type: 'boolean' } }) }) },
       '/api/plan/{fecha}/{comida}': {
         put: op('Asignar platillo o estado a un espacio', {
           parameters: [p('fecha', 'AAAA-MM-DD'), p('comida', COMIDAS.join('|'))],
-          requestBody: body({ platillo: { type: 'string' }, para: lista, guarniciones: lista, modo: { type: 'string', enum: ['reemplazar', 'agregar'] }, estado: { type: ['string', 'null'], enum: [...Object.keys(ESTADOS), null] }, invitados: { type: 'integer' }, nota: { type: 'string' }, quitarPlato: { type: 'integer' } }),
+          requestBody: body({ platillo: { type: 'string' }, para: lista, guarniciones: lista, modo: { type: 'string', enum: ['reemplazar', 'agregar'] }, estado: { type: ['string', 'null'], enum: [...Object.keys(ESTADOS), null] }, invitados: enteroNatural, nota: { type: 'string' }, quitarPlato: enteroNatural, reemplazarPlato: enteroNatural, soloSiVacio: { type: 'boolean' }, platilloEsperado: { type: 'string', description: 'ID del platillo que se espera en el índice al editar o quitar' } }),
         }),
       },
       '/api/plan/{fecha}/{comida}/hecho': {
@@ -57,9 +60,10 @@ export function openapi(servidor) {
       '/api/refri/que-hago': { get: op('Qué hacer con lo que hay', { parameters: [q('comida', '')] }) },
       '/api/compras': {
         get: op('Lista del súper de la semana', { parameters: [q('fecha', '', fecha)] }),
-        post: op('Agregar extra a la lista', { requestBody: body({ nombre: { type: 'string' }, seccion: { type: 'string', enum: Object.keys(SECCIONES) }, fecha }, ['nombre']) }),
+        post: op('Agregar extra a la lista', { requestBody: body({ nombre: { type: 'string' }, seccion: { type: 'string', enum: Object.keys(SECCIONES) }, fecha, alimento: { type: 'boolean' } }, ['nombre']) }),
       },
       '/api/compras/marcar': { post: op('Tachar/destachar', { requestBody: body({ nombre: { type: 'string' }, marcado: { type: 'boolean' }, fecha }, ['nombre']) }) },
+      '/api/compras/al-refri': { post: op('Pasar alimentos marcados al refri', { requestBody: body({ fecha }) }) },
     },
   };
 }

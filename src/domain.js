@@ -1,6 +1,6 @@
 // Lógica de "Mi Cocina": platillos, calificaciones, plan semanal, sugerencias,
 // refri, lista del súper e historial. La usan la API REST y el conector MCP.
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 export const COMIDAS = ['desayuno', 'comida', 'cena'];
 export const ESTADOS = {
@@ -26,7 +26,16 @@ const VERDURA = ['jitomate', 'tomate', 'cebolla', 'chile', 'cilantro', 'aguacate
 
 // ---------- utilidades ----------
 export const normalizar = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim().replace(/\s+/g, ' ');
-const uid = () => randomUUID().slice(0, 8);
+const uid = () => randomBytes(16).toString('hex');
+const ALIAS_INGREDIENTES = new Map([
+  ['m/p', 'muslo con pierna'], ['m/p (muslo con pierna)', 'muslo con pierna'],
+  ['plm', 'pierna con muslo abierta'], ['plm (pierna con muslo abierta)', 'pierna con muslo abierta'],
+  ['huevos', 'huevo'], ['chiles', 'chile'], ['pimientos', 'pimiento'],
+  ['nopales', 'nopal'], ['spaguetti', 'espagueti'], ['spaghetti', 'espagueti'],
+  ['queso rayado', 'queso rallado'],
+]);
+const idIngrediente = (nombre) => { const id = normalizar(nombre); return ALIAS_INGREDIENTES.get(id) || id; };
+const nombreIngrediente = (nombre) => ALIAS_INGREDIENTES.get(normalizar(nombre)) || nombre;
 
 export function hoyISO() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
@@ -37,14 +46,20 @@ export function sumarDias(iso, n) { const d = aFecha(iso); d.setUTCDate(d.getUTC
 export function diasEntre(a, b) { return Math.round((aFecha(b) - aFecha(a)) / 86400000); }
 export function inicioSemana(iso = hoyISO()) { const d = aFecha(iso); const dow = d.getUTCDay(); return sumarDias(iso, dow === 0 ? -6 : 1 - dow); }
 export const nombreDia = (iso) => DIAS[aFecha(iso).getUTCDay()];
-const validarFecha = (f) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(f || '')) throw new ErrorUsuario(`Fecha inválida: "${f}". Usa AAAA-MM-DD.`); return f; };
+function validarFecha(f) {
+  if (typeof f !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(f)
+      || !Number.isFinite(+aFecha(f)) || aISO(aFecha(f)) !== f) {
+    throw new ErrorUsuario(`Fecha inválida: "${f}". Usa una fecha real en formato AAAA-MM-DD.`);
+  }
+  return f;
+}
 const validarComida = (c) => { if (!COMIDAS.includes(c)) throw new ErrorUsuario(`Comida inválida: "${c}". Usa desayuno, comida o cena.`); return c; };
 
 export function seccionDe(ingrediente) {
-  // Coincidencia al inicio de palabra ("res" no debe coincidir con "fresco")
-  const n = ` ${normalizar(ingrediente).replace(/[()]/g, ' ')}`;
-  if (CARNICERIA.some((k) => n.includes(` ${k}`))) return 'carniceria';
-  if (VERDURA.some((k) => n.includes(` ${k}`))) return 'verdura';
+  const palabras = idIngrediente(ingrediente).split(/[^a-z0-9/]+/);
+  const coincide = (k) => palabras.some((p) => p === k || p === `${k}s` || p === `${k}es`);
+  if (CARNICERIA.some(coincide)) return 'carniceria';
+  if (VERDURA.some(coincide)) return 'verdura';
   return 'super';
 }
 
@@ -52,6 +67,41 @@ export class ErrorUsuario extends Error { constructor(m, status = 400) { super(m
 
 const listaTexto = (v) => (Array.isArray(v) ? v : String(v ?? '').split(','))
   .map((x) => String(x).trim()).filter(Boolean);
+const porIngrediente = (nombres) => [...new Map(nombres.map((n) => [idIngrediente(n), nombreIngrediente(n)])).values()];
+const estaVacio = (s) => !s || (!s.platos.length && (!s.estado || s.estado === 'cocinar'));
+const esEstadoEspecial = (s) => s.estado && s.estado !== 'cocinar';
+
+function resolverNombre(ref, elementos) {
+  const n = normalizar(ref);
+  if (typeof ref !== 'string' || !n) throw new ErrorUsuario('Indica un nombre o ID.');
+  const exacto = elementos.find((p) => p.id === ref);
+  if (exacto) return exacto;
+  const coincidencias = [
+    (p) => normalizar(p.nombre) === n,
+    (p) => normalizar(p.nombre).startsWith(n),
+    (p) => normalizar(p.nombre).includes(n),
+  ];
+  for (const coincide of coincidencias) {
+    const candidatos = elementos.filter(coincide);
+    if (candidatos.length > 1) throw new ErrorUsuario(`«${ref}» coincide con varias opciones. Elige: ${candidatos.map((p) => p.nombre).join(', ')}.`, 409);
+    if (candidatos.length) return candidatos[0];
+  }
+  throw new ErrorUsuario(`No encontré «${ref}».`, 404);
+}
+
+function mapaRefri(refri) {
+  const porId = new Map();
+  for (const item of refri) {
+    const id = idIngrediente(item.nombre || item.id);
+    const previo = porId.get(id);
+    if (previo?.canonico && item.id !== id) continue;
+    porId.set(id, {
+      id, nombre: nombreIngrediente(item.nombre || item.id), canonico: item.id === id,
+      tengo: Boolean(item.tengo || (item.id !== id && previo?.tengo)),
+    });
+  }
+  return porId;
+}
 
 // ---------- servicio ----------
 export function crearCocina(store) {
@@ -66,8 +116,14 @@ export function crearCocina(store) {
   async function guardarConfig(patch) {
     const actual = await obtenerConfig();
     const nuevo = { ...actual };
-    if (patch.diasCocina) nuevo.diasCocina = patch.diasCocina.map(Number).filter((d) => d >= 0 && d <= 6);
-    if (patch.comidasActivas) nuevo.comidasActivas = patch.comidasActivas.filter((c) => COMIDAS.includes(c));
+    if (patch.diasCocina !== undefined) {
+      if (!Array.isArray(patch.diasCocina) || patch.diasCocina.some((d) => !Number.isInteger(d) || d < 0 || d > 6)) throw new ErrorUsuario('Los días van de 0 a 6.');
+      nuevo.diasCocina = [...new Set(patch.diasCocina)];
+    }
+    if (patch.comidasActivas !== undefined) {
+      if (!Array.isArray(patch.comidasActivas) || !patch.comidasActivas.length || patch.comidasActivas.some((c) => !COMIDAS.includes(c))) throw new ErrorUsuario('Elige al menos desayuno, comida o cena.');
+      nuevo.comidasActivas = COMIDAS.filter((c) => patch.comidasActivas.includes(c));
+    }
     await store.put('config', 'general', nuevo);
     return nuevo;
   }
@@ -78,19 +134,18 @@ export function crearCocina(store) {
     return incluirInactivas ? ps : ps.filter((p) => p.activo !== false);
   }
   async function resolverPersona(ref) {
-    const ps = await listarPersonas({ incluirInactivas: true });
-    const n = normalizar(ref);
-    const p = ps.find((x) => x.id === ref) || ps.find((x) => normalizar(x.nombre) === n) || ps.find((x) => normalizar(x.nombre).startsWith(n));
-    if (!p) throw new ErrorUsuario(`No encontré a la persona "${ref}". Personas: ${ps.map((x) => x.nombre).join(', ')}`);
-    return p;
+    return resolverNombre(ref, await listarPersonas({ incluirInactivas: true }));
   }
   async function guardarPersona(datos) {
     const existente = datos.id ? await store.get('personas', datos.id) : null;
-    if (!existente && !datos.nombre) throw new ErrorUsuario('La persona necesita un nombre.');
+    if (datos.id && !existente) throw new ErrorUsuario('No encontré a esa persona.', 404);
+    const nombre = datos.nombre ?? existente?.nombre;
+    if (typeof nombre !== 'string' || !nombre.trim()) throw new ErrorUsuario('La persona necesita un nombre.');
+    if (datos.rol !== undefined && !['adulto', 'nino'].includes(datos.rol)) throw new ErrorUsuario('Elige adulto o niño.');
     const todas = await listarPersonas({ incluirInactivas: true });
     const p = {
       id: existente?.id || uid(),
-      nombre: datos.nombre ?? existente?.nombre,
+      nombre: nombre.trim(),
       emoji: datos.emoji ?? existente?.emoji ?? '🙂',
       rol: datos.rol ?? existente?.rol ?? 'adulto',
       activo: datos.activo ?? existente?.activo ?? true,
@@ -105,30 +160,33 @@ export function crearCocina(store) {
     const [platillos, historial, personas, refri] = await Promise.all([
       store.all('platillos'), store.all('historial'), listarPersonas(), store.all('refri'),
     ]);
-    const tengo = new Set(refri.filter((r) => r.tengo).map((r) => r.id));
-    return { platillos, historial, personas, tengo };
+    const inventario = mapaRefri(refri);
+    const tengo = new Set([...inventario.values()].filter((r) => r.tengo).map((r) => r.id));
+    return { platillos, historial, personas, tengo, inventario };
   }
 
   function estadisticas(p, { historial, personas, tengo }, hoy = hoyISO()) {
-    const hechos = historial.filter((h) => h.platilloId === p.id).sort((a, b) => b.fecha.localeCompare(a.fecha));
-    const ultimaVez = hechos[0]?.fecha || null;
+    const fechas = new Map();
+    for (const h of historial) if (h.platilloId === p.id && h.fecha <= hoy) fechas.set(`${h.fecha}_${h.comida}`, h.fecha);
+    const hechos = [...fechas.values()].sort((a, b) => b.localeCompare(a));
+    const ultimaVez = hechos[0] || null;
     const califs = personas
       .map((per) => ({ persona: per, estrellas: p.calificaciones?.[per.id] }))
       .filter((c) => c.estrellas);
     const puntaje = califs.length ? califs.reduce((s, c) => s + c.estrellas, 0) / califs.length : null;
     const ninos = califs.filter((c) => c.persona.rol === 'nino');
     const puntajeNinos = ninos.length ? ninos.reduce((s, c) => s + c.estrellas, 0) / ninos.length : null;
-    const ingr = p.ingredientes || [];
-    const tieneIngr = ingr.filter((i) => tengo.has(normalizar(i)));
+    const ingr = porIngrediente(p.ingredientes || []);
+    const tieneIngr = ingr.filter((i) => tengo.has(idIngrediente(i)));
     return {
       veces: (p.vecesPrevias || 0) + hechos.length,
-      vecesUltimos30: hechos.filter((h) => diasEntre(h.fecha, hoy) <= 30).length,
+      vecesUltimos30: hechos.filter((f) => diasEntre(f, hoy) <= 30).length,
       ultimaVez,
       diasDesde: ultimaVez ? diasEntre(ultimaVez, hoy) : null,
       puntaje: puntaje == null ? null : Math.round(puntaje * 10) / 10,
       puntajeNinos: puntajeNinos == null ? null : Math.round(puntajeNinos * 10) / 10,
       tienes: tieneIngr.length,
-      faltan: ingr.filter((i) => !tengo.has(normalizar(i))),
+      faltan: ingr.filter((i) => !tengo.has(idIngrediente(i))),
     };
   }
 
@@ -140,10 +198,11 @@ export function crearCocina(store) {
     return { ...p, calificacionesPorNombre, stats: estadisticas(p, ctx) };
   }
 
-  async function listarPlatillos({ texto, tipo, categoria } = {}) {
+  async function listarPlatillos({ texto, tipo, categoria, incluirArchivados = false } = {}) {
     const ctx = await contexto();
     const t = normalizar(texto);
     return ctx.platillos
+      .filter((p) => incluirArchivados || !p.archivado)
       .filter((p) => !tipo || (p.tipos || []).includes(tipo))
       .filter((p) => !categoria || normalizar(p.categoria) === normalizar(categoria))
       .filter((p) => !t || normalizar(p.nombre).includes(t) || (p.ingredientes || []).some((i) => normalizar(i).includes(t)))
@@ -152,16 +211,10 @@ export function crearCocina(store) {
   }
 
   async function resolverPlatillo(ref) {
-    if (!ref) throw new ErrorUsuario('Falta indicar el platillo.');
+    if (typeof ref !== 'string' || !ref.trim()) throw new ErrorUsuario('Falta indicar el platillo.');
     const directo = await store.get('platillos', ref);
     if (directo) return directo;
-    const todos = await store.all('platillos');
-    const n = normalizar(ref);
-    const p = todos.find((x) => normalizar(x.nombre) === n)
-      || todos.find((x) => normalizar(x.nombre).startsWith(n))
-      || todos.find((x) => normalizar(x.nombre).includes(n));
-    if (!p) throw new ErrorUsuario(`No encontré el platillo "${ref}".`, 404);
-    return p;
+    return resolverNombre(ref, await store.all('platillos'));
   }
 
   async function obtenerPlatillo(ref) {
@@ -171,28 +224,37 @@ export function crearCocina(store) {
 
   function limpiarPlatillo(datos, base = {}) {
     const p = { ...base };
-    if (datos.nombre !== undefined) p.nombre = String(datos.nombre).trim();
+    if (datos.nombre !== undefined) {
+      if (typeof datos.nombre !== 'string' || !datos.nombre.trim()) throw new ErrorUsuario('El platillo necesita un nombre.');
+      p.nombre = datos.nombre.trim();
+    }
     if (datos.tipos !== undefined) p.tipos = listaTexto(datos.tipos).filter((t) => COMIDAS.includes(t));
     if (datos.categoria !== undefined) p.categoria = normalizar(datos.categoria) || 'sin carne';
-    if (datos.tiempo !== undefined) p.tiempo = TIEMPOS[datos.tiempo] ? datos.tiempo : 'medio';
-    if (datos.ingredientes !== undefined) p.ingredientes = [...new Set(listaTexto(datos.ingredientes).map((i) => i.toLowerCase()))];
+    if (datos.tiempo !== undefined) p.tiempo = Object.hasOwn(TIEMPOS, datos.tiempo) ? datos.tiempo : 'medio';
+    if (datos.ingredientes !== undefined) p.ingredientes = porIngrediente(listaTexto(datos.ingredientes).map((i) => i.toLowerCase()));
     if (datos.guarniciones !== undefined) p.guarniciones = listaTexto(datos.guarniciones);
     if (datos.etiquetas !== undefined) p.etiquetas = listaTexto(datos.etiquetas).map(normalizar);
     if (datos.notas !== undefined) p.notas = String(datos.notas);
+    if (datos.vecesPrevias !== undefined) {
+      if (!Number.isSafeInteger(datos.vecesPrevias) || datos.vecesPrevias < 0) throw new ErrorUsuario('Las veces de la libreta deben ser un número entero desde 0.');
+      p.vecesPrevias = datos.vecesPrevias;
+    }
+    if (!p.tipos?.length) throw new ErrorUsuario('Elige al menos desayuno, comida o cena.');
     return p;
   }
 
   async function crearPlatillo(datos) {
-    if (!datos?.nombre) throw new ErrorUsuario('El platillo necesita un nombre.');
+    if (typeof datos?.nombre !== 'string' || !datos.nombre.trim()) throw new ErrorUsuario('El platillo necesita un nombre.');
     const todos = await store.all('platillos');
     if (todos.some((x) => normalizar(x.nombre) === normalizar(datos.nombre))) {
       throw new ErrorUsuario(`Ya existe un platillo llamado "${datos.nombre}".`, 409);
     }
     const p = limpiarPlatillo(
       { tipos: ['comida', 'cena'], categoria: 'sin carne', tiempo: 'medio', ingredientes: [], guarniciones: [], etiquetas: [], notas: '', ...datos },
-      { id: uid(), calificaciones: {}, vecesPrevias: Number(datos.vecesPrevias) || 0, creado: hoyISO() },
+      { id: uid(), calificaciones: {}, vecesPrevias: 0, creado: hoyISO() },
     );
     await store.put('platillos', p.id, p);
+    if (datos.calificaciones !== undefined) return calificar(p.id, datos.calificaciones);
     return obtenerPlatillo(p.id);
   }
 
@@ -200,25 +262,37 @@ export function crearCocina(store) {
     const actual = await resolverPlatillo(ref);
     const p = limpiarPlatillo(cambios, actual);
     if (!p.nombre) throw new ErrorUsuario('El nombre no puede quedar vacío.');
+    if (normalizar(p.nombre) !== normalizar(actual.nombre) && (await store.all('platillos')).some((x) => x.id !== p.id && normalizar(x.nombre) === normalizar(p.nombre))) {
+      throw new ErrorUsuario(`Ya existe un platillo llamado "${p.nombre}".`, 409);
+    }
     await store.put('platillos', p.id, p);
+    if (cambios.calificaciones !== undefined) return calificar(p.id, cambios.calificaciones);
     return obtenerPlatillo(p.id);
   }
 
-  async function eliminarPlatillo(ref) {
+  async function usosFuturos(ref) {
     const p = await resolverPlatillo(ref);
-    await store.del('platillos', p.id);
-    return { eliminado: p.nombre };
+    const hoy = hoyISO();
+    return (await store.all('plan')).filter((s) => s.fecha >= hoy && !s.hecho && s.platos.some((pl) => pl.platilloId === p.id))
+      .map(({ fecha, comida }) => ({ fecha, comida })).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  }
+
+  async function archivarPlatillo(ref, archivado = true) {
+    const p = await resolverPlatillo(ref);
+    p.archivado = archivado;
+    await store.put('platillos', p.id, p);
+    return { nombre: p.nombre, archivado, usosFuturos: await usosFuturos(p.id) };
   }
 
   async function calificar(ref, estrellasPorPersona) {
     const p = await resolverPlatillo(ref);
     p.calificaciones ||= {};
-    for (const [quien, valor] of Object.entries(estrellasPorPersona || {})) {
+    if (!estrellasPorPersona || typeof estrellasPorPersona !== 'object' || Array.isArray(estrellasPorPersona)) throw new ErrorUsuario('Indica las estrellas por persona.');
+    for (const [quien, valor] of Object.entries(estrellasPorPersona)) {
       const per = await resolverPersona(quien);
-      const n = Math.round(Number(valor));
-      if (!n) delete p.calificaciones[per.id];
-      else if (n < 1 || n > 5) throw new ErrorUsuario('Las estrellas van de 1 a 5.');
-      else p.calificaciones[per.id] = n;
+      if (!Number.isInteger(valor) || valor < 0 || valor > 5) throw new ErrorUsuario('Las estrellas van de 1 a 5. Usa 0 para quitar una calificación.');
+      if (valor === 0) delete p.calificaciones[per.id];
+      else p.calificaciones[per.id] = valor;
     }
     await store.put('platillos', p.id, p);
     return obtenerPlatillo(p.id);
@@ -232,48 +306,54 @@ export function crearCocina(store) {
       || { id: slotId(fecha, comida), fecha, comida, estado: null, platos: [], invitados: 0, hecho: false, nota: '' };
   }
 
-  async function obtenerSemana(fecha = hoyISO()) {
+  async function obtenerSemana(fecha = hoyISO(), base) {
     validarFecha(fecha);
     const inicio = inicioSemana(fecha);
-    const config = await obtenerConfig();
-    const ctx = await contexto();
-    const porId = Object.fromEntries(ctx.platillos.map((p) => [p.id, p]));
-    const personasPorId = Object.fromEntries(ctx.personas.map((p) => [p.id, p]));
-    const plan = (await store.all('plan')).filter((s) => s.fecha >= inicio && s.fecha <= sumarDias(inicio, 6));
+    const [config, platillos, personas, plan] = base
+      ? [base.config, base.ctx.platillos, base.ctx.personas, [...base.plan.values()]]
+      : await Promise.all([obtenerConfig(), store.all('platillos'), listarPersonas(), store.all('plan')]);
+    const porId = new Map(platillos.map((p) => [p.id, p]));
+    const personasPorId = new Map(personas.map((p) => [p.id, p]));
+    const porSlot = new Map(plan.map((s) => [s.id, s]));
+    const hoy = hoyISO();
     const dias = [];
     for (let i = 0; i < 7; i++) {
       const f = sumarDias(inicio, i);
       const dow = aFecha(f).getUTCDay();
       const comidas = {};
       for (const c of config.comidasActivas) {
-        const s = plan.find((x) => x.fecha === f && x.comida === c);
+        const s = porSlot.get(slotId(f, c));
+        const estado = s && !estaVacio(s) ? s.estado : null;
         comidas[c] = s ? {
           ...s,
-          etiqueta: s.estado ? ESTADOS[s.estado] : null,
+          estado,
+          etiqueta: estado ? ESTADOS[estado] : null,
           platos: s.platos.map((pl) => ({
             ...pl,
-            nombre: porId[pl.platilloId]?.nombre || '(platillo eliminado)',
-            paraNombres: pl.para?.length ? pl.para.map((id) => personasPorId[id]?.nombre).filter(Boolean) : ['Todos'],
+            nombre: porId.get(pl.platilloId)?.nombre || pl.nombre || '(platillo eliminado)',
+            disponible: porId.has(pl.platilloId),
+            paraNombres: pl.para?.length ? pl.para.map((id) => personasPorId.get(id)?.nombre).filter(Boolean) : ['Todos'],
           })),
         } : null;
       }
-      dias.push({ fecha: f, dia: nombreDia(f), cocina: config.diasCocina.includes(dow), esHoy: f === hoyISO(), comidas });
+      dias.push({ fecha: f, dia: nombreDia(f), cocina: config.diasCocina.includes(dow), esHoy: f === hoy, comidas });
     }
-    return { inicio, fin: sumarDias(inicio, 6), comidasActivas: config.comidasActivas, dias };
+    return { inicio, fin: sumarDias(inicio, 6), hoy, comidasActivas: config.comidasActivas, dias };
   }
 
-  async function resolverPara(para) {
+  async function resolverPara(para, activas) {
     if (!para || (Array.isArray(para) && !para.length)) return null;
     const lista = listaTexto(para);
     if (lista.some((x) => ['todos', 'todas', 'familia'].includes(normalizar(x)))) return null;
-    const personas = await listarPersonas();
+    const personas = activas || await listarPersonas();
     const ids = new Set();
     for (const ref of lista) {
       const n = normalizar(ref);
       if (['ninos', 'niños', 'los ninos', 'hijos', 'kids'].includes(n)) personas.filter((p) => p.rol === 'nino').forEach((p) => ids.add(p.id));
       else if (['adultos', 'papas', 'nosotros'].includes(n)) personas.filter((p) => p.rol !== 'nino').forEach((p) => ids.add(p.id));
-      else ids.add((await resolverPersona(ref)).id);
+      else ids.add(resolverNombre(ref, personas).id);
     }
+    if (!ids.size) throw new ErrorUsuario('No hay personas activas en ese grupo.');
     return ids.size === personas.length ? null : [...ids];
   }
 
@@ -283,49 +363,83 @@ export function crearCocina(store) {
    * - platillo + para + guarniciones + modo ("reemplazar" | "agregar")
    * - invitados, nota
    */
-  async function asignar({ fecha, comida, estado, platillo, para, guarniciones, modo = 'reemplazar', invitados, nota, quitarPlato }) {
+  async function guardarAsignacion({ fecha, comida, estado, platillo, para, guarniciones, modo = 'reemplazar', invitados, nota, quitarPlato, reemplazarPlato, soloSiVacio = false, platilloEsperado }, base) {
     validarFecha(fecha); validarComida(comida);
-    const s = await obtenerSlot(fecha, comida);
-    if (estado !== undefined) {
-      if (estado !== null && !ESTADOS[estado]) throw new ErrorUsuario(`Estado inválido. Opciones: ${Object.keys(ESTADOS).join(', ')}`);
-      s.estado = estado;
-      if (estado === null) { s.platos = []; s.hecho = false; }
-      else if (estado !== 'cocinar') s.platos = [];
+    const s = base ? base.slot : await obtenerSlot(fecha, comida);
+    if (s.hecho) throw new ErrorUsuario('Desmarca «Hecho» antes de cambiar esta comida.', 409);
+    if (soloSiVacio && !estaVacio(s)) throw new ErrorUsuario('Ya hay algo en este espacio. Abre la comida para revisarla.', 409);
+    if (!['reemplazar', 'agregar'].includes(modo)) throw new ErrorUsuario('Modo inválido.');
+    const validarIndice = (i) => {
+      if (!Number.isInteger(i) || i < 0 || i >= s.platos.length || (platilloEsperado && s.platos[i].platilloId !== platilloEsperado)) {
+        throw new ErrorUsuario('Ese platillo cambió. Vuelve a abrir la comida para revisarla.', 409);
+      }
+    };
+    if (reemplazarPlato !== undefined) validarIndice(reemplazarPlato);
+    if (quitarPlato !== undefined) {
+      validarIndice(quitarPlato);
+      if (reemplazarPlato !== undefined) throw new ErrorUsuario('Edita o quita un platillo en cada acción.');
+      s.platos.splice(quitarPlato, 1);
     }
-    if (quitarPlato !== undefined) s.platos.splice(Number(quitarPlato), 1);
+    if (estado !== undefined) {
+      if (estado !== null && !Object.hasOwn(ESTADOS, estado)) throw new ErrorUsuario(`Estado inválido. Opciones: ${Object.keys(ESTADOS).join(', ')}`);
+      if (estado !== 'cocinar' && (platillo || reemplazarPlato !== undefined)) throw new ErrorUsuario('Elige un platillo o un estado especial.');
+      s.estado = estado;
+      if (estado !== 'cocinar') s.platos = [];
+    }
+    const anterior = reemplazarPlato === undefined ? null : s.platos[reemplazarPlato];
     if (platillo) {
-      const p = await resolverPlatillo(platillo);
-      const plato = { platilloId: p.id, para: await resolverPara(para), guarniciones: guarniciones !== undefined ? listaTexto(guarniciones) : (p.guarniciones || []).slice(0, 2) };
-      if (modo === 'agregar') {
-        // Si el nuevo es para algunos, lo que ya estaba queda para los demás
+      const p = base?.platillo || await resolverPlatillo(platillo);
+      if (p.archivado) throw new ErrorUsuario(`«${p.nombre}» está archivado.`, 409);
+      const plato = {
+        platilloId: p.id,
+        nombre: p.nombre,
+        para: anterior ? anterior.para : await resolverPara(para),
+        guarniciones: guarniciones !== undefined ? listaTexto(guarniciones) : (p.guarniciones || []).slice(0, 2),
+      };
+      if (anterior) s.platos[reemplazarPlato] = plato;
+      else if (modo === 'agregar') {
         if (plato.para) {
-          const resto = (await listarPersonas()).map((x) => x.id).filter((id) => !plato.para.includes(id));
-          for (const otro of s.platos) if (!otro.para && resto.length) otro.para = resto;
+          const todos = (await listarPersonas()).map((x) => x.id);
+          s.platos = s.platos.flatMap((otro) => {
+            const resto = (otro.para?.length ? otro.para : todos).filter((id) => !plato.para.includes(id));
+            return resto.length ? [{ ...otro, para: resto }] : [];
+          });
         }
         s.platos.push(plato);
       }
       else s.platos = [plato];
       s.estado = 'cocinar';
+    } else if (anterior && guarniciones !== undefined) {
+      anterior.guarniciones = listaTexto(guarniciones);
     }
-    if (invitados !== undefined) s.invitados = Math.max(0, Number(invitados) || 0);
+    if (invitados !== undefined) {
+      if (!Number.isSafeInteger(invitados) || invitados < 0) throw new ErrorUsuario('Indica el número de invitados.');
+      s.invitados = invitados;
+    }
     if (nota !== undefined) s.nota = String(nota);
+    if (estaVacio(s)) s.estado = null;
     if (!s.estado && !s.platos.length && !s.invitados && !s.nota) await store.del('plan', s.id);
     else await store.put('plan', s.id, s);
-    return (await obtenerSemana(fecha)).dias.find((d) => d.fecha === fecha);
+    return s;
+  }
+
+  async function asignar(args) {
+    await guardarAsignacion(args);
+    return (await obtenerSemana(args.fecha)).dias.find((d) => d.fecha === args.fecha);
   }
 
   // ---- sugerencias ----
-  async function sugerir({ fecha = hoyISO(), comida = 'comida', cantidad = 3, rapido = false, categoria, excluir = [], para, usarRefri = true, aleatorio = true } = {}) {
+  async function sugerir({ fecha = hoyISO(), comida = 'comida', cantidad = 3, rapido = false, categoria, excluir = [], para, usarRefri = true, aleatorio = true } = {}, base) {
     validarFecha(fecha); validarComida(comida);
-    const ctx = await contexto();
-    const ids = await resolverPara(para);
+    const ctx = base?.ctx || await contexto();
+    const ids = await resolverPara(para, ctx.personas);
     const comensales = ids ? ctx.personas.filter((p) => ids.includes(p.id)) : ctx.personas;
-    const slot = await obtenerSlot(fecha, comida);
+    const slot = base?.slot || await obtenerSlot(fecha, comida);
     const invitados = slot.invitados || 0;
 
     // Lo planeado esta semana y los días vecinos (para variar)
     const ini = inicioSemana(fecha);
-    const plan = (await store.all('plan')).filter((s) => s.fecha >= sumarDias(ini, -1) && s.fecha <= sumarDias(ini, 7));
+    const plan = (base ? [...base.plan.values()] : await store.all('plan')).filter((s) => s.fecha >= sumarDias(ini, -1) && s.fecha <= sumarDias(ini, 7));
     const enSemana = new Set(plan.filter((s) => !(s.fecha === fecha && s.comida === comida)).flatMap((s) => s.platos.map((p) => p.platilloId)));
     const catVecinas = new Set(plan
       .filter((s) => Math.abs(diasEntre(s.fecha, fecha)) === 1 && s.comida === comida)
@@ -333,6 +447,7 @@ export function crearCocina(store) {
     const excl = new Set(listaTexto(excluir).map(normalizar));
 
     const candidatos = ctx.platillos
+      .filter((p) => !p.archivado)
       .filter((p) => (p.tipos || []).includes(comida))
       .filter((p) => !excl.has(p.id) && !excl.has(normalizar(p.nombre)))
       .filter((p) => !rapido || p.tiempo === 'rapido')
@@ -364,18 +479,20 @@ export function crearCocina(store) {
       if (enSemana.has(p.id)) { puntos -= 45; razones.push('ya está esta semana'); }
       if (catVecinas.has(p.categoria)) { puntos -= 15; razones.push(`ayer o mañana también hay ${p.categoria}`); }
       // Refri
-      if (usarRefri && (p.ingredientes || []).length) {
-        const frac = st.tienes / p.ingredientes.length;
+      const totalIngredientes = st.tienes + st.faltan.length;
+      if (usarRefri && totalIngredientes) {
+        const frac = st.tienes / totalIngredientes;
         puntos += frac * 20;
-        if (st.tienes) razones.push(`tienes ${st.tienes} de ${p.ingredientes.length} ingredientes`);
+        if (st.tienes) razones.push(`tienes ${st.tienes} de ${totalIngredientes} ingredientes`);
       }
       // Invitados
       if (invitados > 0 && (p.etiquetas || []).includes('invitados')) { puntos += 15; razones.push('bueno para invitados'); }
       // Niños
       const hayNinos = comensales.some((c) => c.rol === 'nino');
       if (hayNinos && (p.etiquetas || []).includes('adultos')) { puntos -= 20; razones.push('es más de adultos'); }
+      if (hayNinos && (p.etiquetas || []).includes('ninos')) { puntos += 10; razones.push('favorito de los niños'); }
       if (aleatorio) puntos += Math.random() * 10;
-      return { platillo: { id: p.id, nombre: p.nombre, categoria: p.categoria, tiempo: p.tiempo, guarniciones: p.guarniciones || [] }, puntos: Math.round(puntos), razones, faltan: st.faltan, puntajeNinos: st.puntajeNinos };
+      return { platillo: { id: p.id, nombre: p.nombre, categoria: p.categoria, tiempo: p.tiempo, guarniciones: p.guarniciones || [] }, puntos: Math.round(puntos), razones, faltan: st.faltan, totalIngredientes, puntajeNinos: st.puntajeNinos };
     }).sort((a, b) => b.puntos - a.puntos);
 
     return resultado.slice(0, Math.max(1, Math.min(Number(cantidad) || 3, 20)));
@@ -383,7 +500,9 @@ export function crearCocina(store) {
 
   async function armarSemana({ fecha = hoyISO(), reemplazar = false } = {}) {
     validarFecha(fecha);
-    const config = await obtenerConfig();
+    const [config, ctx, slots] = await Promise.all([obtenerConfig(), contexto(), store.all('plan')]);
+    const plan = new Map(slots.map((s) => [s.id, s]));
+    const platillos = new Map(ctx.platillos.map((p) => [p.id, p]));
     const ini = inicioSemana(fecha);
     const hoy = hoyISO();
     const llenados = [];
@@ -392,65 +511,80 @@ export function crearCocina(store) {
       if (f < hoy) continue; // no cambiar días pasados
       if (!config.diasCocina.includes(aFecha(f).getUTCDay())) continue;
       for (const c of config.comidasActivas) {
-        const s = await obtenerSlot(f, c);
-        if (s.hecho) continue;
-        if (!reemplazar && (s.estado || s.platos.length)) continue;
-        const [mejor] = await sugerir({ fecha: f, comida: c, cantidad: 1 });
+        const id = slotId(f, c);
+        const s = plan.get(id) || { id, fecha: f, comida: c, estado: null, platos: [], invitados: 0, hecho: false, nota: '' };
+        if (s.hecho || esEstadoEspecial(s) || s.platos.length > 1 || s.platos.some((p) => p.para?.length)) continue;
+        if (!reemplazar && !estaVacio(s)) continue;
+        const [mejor] = await sugerir({ fecha: f, comida: c, cantidad: 1 }, { ctx, plan, slot: s });
         if (!mejor) continue;
-        await asignar({ fecha: f, comida: c, platillo: mejor.platillo.id });
+        const nuevo = await guardarAsignacion({ fecha: f, comida: c, platillo: mejor.platillo.id }, { slot: s, platillo: platillos.get(mejor.platillo.id) });
+        plan.set(id, nuevo);
         llenados.push({ fecha: f, dia: nombreDia(f), comida: c, platillo: mejor.platillo.nombre });
       }
     }
-    return { llenados, semana: await obtenerSemana(fecha) };
+    return { llenados, semana: await obtenerSemana(fecha, { config, ctx, plan }) };
   }
 
   // ---- marcar hecho + historial ----
   async function marcarHecho({ fecha, comida, calificaciones, seAcabo }) {
     validarFecha(fecha); validarComida(comida);
+    if (fecha > hoyISO()) throw new ErrorUsuario('Todavía no puedes registrar una comida futura.');
     const s = await obtenerSlot(fecha, comida);
     if (!s.platos.length) throw new ErrorUsuario('Ese espacio no tiene platillos para marcar como hecho.');
+    const verDia = async () => (await obtenerSemana(fecha)).dias.find((d) => d.fecha === fecha);
+    if (s.hecho) return verDia();
+    if (calificaciones !== undefined && (!calificaciones || typeof calificaciones !== 'object' || Array.isArray(calificaciones))) throw new ErrorUsuario('Indica las calificaciones por platillo.');
+    for (const [ref, porPersona] of Object.entries(calificaciones || {})) {
+      const p = await resolverPlatillo(ref);
+      if (!s.platos.some((pl) => pl.platilloId === p.id)) throw new ErrorUsuario(`«${p.nombre}» no está en esta comida.`);
+      await calificar(p.id, porPersona);
+    }
+    if (seAcabo?.length) await guardarRefri([], seAcabo);
+    const platillos = new Map((await store.all('platillos')).map((p) => [p.id, p]));
     const existentes = (await store.all('historial')).filter((h) => h.fecha === fecha && h.comida === comida);
     for (const h of existentes) await store.del('historial', h.id);
     for (const pl of s.platos) {
-      const h = { id: uid(), fecha, comida, platilloId: pl.platilloId, para: pl.para, invitados: s.invitados || 0 };
+      const h = { id: uid(), fecha, comida, platilloId: pl.platilloId, nombre: platillos.get(pl.platilloId)?.nombre || pl.nombre, para: pl.para, invitados: s.invitados || 0 };
       await store.put('historial', h.id, h);
     }
     s.hecho = true;
     s.estado = 'cocinar';
     await store.put('plan', s.id, s);
-    for (const [ref, porPersona] of Object.entries(calificaciones || {})) await calificar(ref, porPersona);
-    if (seAcabo?.length) await actualizarRefri({ seAcabo });
-    return (await obtenerSemana(fecha)).dias.find((d) => d.fecha === fecha);
+    return verDia();
   }
 
   async function desmarcarHecho({ fecha, comida }) {
+    validarFecha(fecha); validarComida(comida);
     const s = await obtenerSlot(fecha, comida);
     for (const h of (await store.all('historial')).filter((x) => x.fecha === fecha && x.comida === comida)) await store.del('historial', h.id);
     s.hecho = false;
-    await store.put('plan', s.id, s);
+    if (!estaVacio(s) || s.invitados || s.nota) await store.put('plan', s.id, s);
+    else await store.del('plan', s.id);
     return (await obtenerSemana(fecha)).dias.find((d) => d.fecha === fecha);
   }
 
-  async function listarHistorial({ desde, hasta, platillo } = {}) {
-    const ctx = await contexto();
+  async function listarHistorial({ desde, hasta = hoyISO(), platillo } = {}) {
+    if (desde !== undefined) validarFecha(desde);
+    validarFecha(hasta);
+    const [historial, platillos] = await Promise.all([store.all('historial'), store.all('platillos')]);
     const pid = platillo ? (await resolverPlatillo(platillo)).id : null;
-    const porId = Object.fromEntries(ctx.platillos.map((p) => [p.id, p.nombre]));
-    return ctx.historial
-      .filter((h) => (!desde || h.fecha >= desde) && (!hasta || h.fecha <= hasta) && (!pid || h.platilloId === pid))
+    const porId = new Map(platillos.map((p) => [p.id, p.nombre]));
+    return historial
+      .filter((h) => (!desde || h.fecha >= desde) && h.fecha <= hasta && (!pid || h.platilloId === pid))
       .sort((a, b) => b.fecha.localeCompare(a.fecha) || COMIDAS.indexOf(a.comida) - COMIDAS.indexOf(b.comida))
-      .map((h) => ({ ...h, dia: nombreDia(h.fecha), platillo: porId[h.platilloId] || '(eliminado)' }));
+      .map((h) => ({ ...h, dia: nombreDia(h.fecha), platillo: h.nombre || porId.get(h.platilloId) || '(eliminado)' }));
   }
 
   // ---- refri ----
   async function listarRefri() {
     const [platillos, refri] = await Promise.all([store.all('platillos'), store.all('refri')]);
     const items = new Map();
-    for (const p of platillos) for (const i of p.ingredientes || []) {
-      const id = normalizar(i);
+    for (const p of platillos.filter((p) => !p.archivado)) for (const i of porIngrediente([...(p.ingredientes || []), ...(p.guarniciones || [])])) {
+      const id = idIngrediente(i);
       if (!items.has(id)) items.set(id, { id, nombre: i, seccion: seccionDe(i), tengo: false, usos: 0 });
       items.get(id).usos++;
     }
-    for (const r of refri) {
+    for (const r of mapaRefri(refri).values()) {
       if (!items.has(r.id)) items.set(r.id, { id: r.id, nombre: r.nombre, seccion: seccionDe(r.nombre), tengo: false, usos: 0 });
       items.get(r.id).tengo = !!r.tengo;
     }
@@ -458,102 +592,172 @@ export function crearCocina(store) {
   }
 
   async function actualizarRefri({ tengo = [], seAcabo = [] } = {}) {
-    for (const n of listaTexto(tengo)) await store.put('refri', normalizar(n), { id: normalizar(n), nombre: n.toLowerCase(), tengo: true });
-    for (const n of listaTexto(seAcabo)) {
-      const id = normalizar(n);
-      const r = await store.get('refri', id);
-      await store.put('refri', id, { id, nombre: r?.nombre || n.toLowerCase(), tengo: false });
-    }
+    await guardarRefri(tengo, seAcabo);
     return (await listarRefri()).filter((r) => r.tengo).map((r) => r.nombre);
   }
 
+  async function guardarRefri(tengo = [], seAcabo = []) {
+    const cambios = new Map();
+    for (const [nombres, hay] of [[tengo, true], [seAcabo, false]]) {
+      for (const n of listaTexto(nombres)) {
+        const id = idIngrediente(n);
+        if (id.length > 120) throw new ErrorUsuario('El nombre del ingrediente es demasiado largo.');
+        cambios.set(id, { id, nombre: nombreIngrediente(n.toLowerCase()), tengo: hay });
+      }
+    }
+    for (const [id, item] of cambios) await store.put('refri', id, item);
+  }
+
   async function queHagoConLoQueTengo({ comida = 'comida', cantidad = 5 } = {}) {
+    validarComida(comida);
     const ctx = await contexto();
     return ctx.platillos
-      .filter((p) => (p.tipos || []).includes(comida) && (p.ingredientes || []).length)
+      .filter((p) => !p.archivado && (p.tipos || []).includes(comida) && (p.ingredientes || []).length)
       .map((p) => {
         const st = estadisticas(p, ctx);
-        return { platillo: p.nombre, id: p.id, tienes: st.tienes, total: p.ingredientes.length, faltan: st.faltan, puntaje: st.puntaje };
+        return { platillo: p.nombre, id: p.id, tienes: st.tienes, total: st.tienes + st.faltan.length, faltan: st.faltan, puntaje: st.puntaje };
       })
       .filter((x) => x.tienes > 0)
       .sort((a, b) => (b.tienes / b.total) - (a.tienes / a.total) || (b.puntaje || 0) - (a.puntaje || 0))
-      .slice(0, cantidad);
+      .slice(0, Math.max(1, Math.min(Number(cantidad) || 5, 20)));
   }
 
   // ---- lista del súper ----
+  async function obtenerCompras(fecha) {
+    validarFecha(fecha);
+    const id = inicioSemana(fecha);
+    const doc = (await store.get('compras', id)) || { id, marcados: [], extras: [] };
+    const extras = new Map();
+    for (const ex of doc.extras) {
+      const clave = idIngrediente(ex.nombre || ex.id);
+      extras.set(clave, {
+        ...ex, id: clave, nombre: nombreIngrediente(ex.nombre || ex.id),
+        seccion: Object.hasOwn(SECCIONES, ex.seccion) ? ex.seccion : 'super',
+        marcado: Boolean(ex.marcado || extras.get(clave)?.marcado),
+        alimento: Boolean(ex.alimento || extras.get(clave)?.alimento),
+      });
+    }
+    return { id, marcados: [...new Set(doc.marcados.map(idIngrediente))], extras: [...extras.values()], alimentosMarcados: doc.alimentosMarcados || [] };
+  }
+
   async function listaCompras({ fecha = hoyISO(), incluirLoQueTengo = false } = {}) {
-    const ini = inicioSemana(fecha);
-    const semana = await obtenerSemana(fecha);
-    const ctx = await contexto();
-    const porId = Object.fromEntries(ctx.platillos.map((p) => [p.id, p]));
-    const doc = (await store.get('compras', ini)) || { id: ini, marcados: [], extras: [] };
+    validarFecha(fecha);
+    const [semana, platillos, refri, doc] = await Promise.all([obtenerSemana(fecha), store.all('platillos'), store.all('refri'), obtenerCompras(fecha)]);
+    const porId = new Map(platillos.map((p) => [p.id, p]));
+    const inventario = mapaRefri(refri);
+    const alimentos = new Set([...inventario.keys(), ...platillos.flatMap((p) => [...(p.ingredientes || []), ...(p.guarniciones || [])]).map(idIngrediente)]);
     const marcados = new Set(doc.marcados);
-    const hoy = hoyISO();
     const items = new Map();
     for (const d of semana.dias) {
-      if (d.fecha < hoy) continue;
+      if (d.fecha < semana.hoy) continue;
       for (const s of Object.values(d.comidas)) {
         if (!s || s.estado !== 'cocinar' || s.hecho) continue;
         for (const pl of s.platos) {
-          const p = porId[pl.platilloId];
-          if (!p) continue;
-          for (const ing of p.ingredientes || []) {
-            const id = normalizar(ing);
-            if (!incluirLoQueTengo && ctx.tengo.has(id)) continue;
-            if (!items.has(id)) items.set(id, { id, nombre: ing, seccion: seccionDe(ing), para: [], marcado: marcados.has(id) });
+          const p = porId.get(pl.platilloId);
+          for (const ing of porIngrediente([...(p?.ingredientes || []), ...(pl.guarniciones || [])])) {
+            const id = idIngrediente(ing);
+            if (!incluirLoQueTengo && inventario.get(id)?.tengo) continue;
+            if (!items.has(id)) items.set(id, { id, nombre: ing, seccion: seccionDe(ing), para: [], marcado: marcados.has(id), alimento: true });
             const it = items.get(id);
-            if (!it.para.includes(p.nombre)) it.para.push(p.nombre);
+            if (!it.para.includes(pl.nombre)) it.para.push(pl.nombre);
           }
         }
       }
     }
+    // Una compra ya realizada sigue disponible aunque cambie el plan.
+    for (const item of doc.alimentosMarcados) {
+      if (items.has(item.id) || (!incluirLoQueTengo && inventario.get(item.id)?.tengo)) continue;
+      items.set(item.id, { ...item, marcado: true, alimento: true });
+    }
+    for (const ex of doc.extras) {
+      const it = items.get(ex.id);
+      items.set(ex.id, {
+        ...it,
+        ...ex,
+        extra: true,
+        marcado: Boolean(it?.marcado || ex.marcado || marcados.has(ex.id)),
+        alimento: Boolean(it?.alimento || ex.alimento || alimentos.has(ex.id)),
+      });
+    }
     const secciones = Object.fromEntries(Object.keys(SECCIONES).map((k) => [k, []]));
     for (const it of items.values()) secciones[it.seccion].push(it);
-    for (const ex of doc.extras) secciones[ex.seccion in secciones ? ex.seccion : 'super'].push({ ...ex, extra: true });
     for (const k of Object.keys(secciones)) secciones[k].sort((a, b) => a.marcado - b.marcado || a.nombre.localeCompare(b.nombre, 'es'));
-    return { semana: ini, secciones, nombresSecciones: SECCIONES };
+    return { semana: semana.inicio, secciones, nombresSecciones: SECCIONES };
   }
 
   async function marcarCompra({ fecha = hoyISO(), nombre, marcado = true }) {
-    const ini = inicioSemana(fecha);
-    const doc = (await store.get('compras', ini)) || { id: ini, marcados: [], extras: [] };
-    const id = normalizar(nombre);
+    const doc = await obtenerCompras(fecha);
+    const id = idIngrediente(nombre);
+    if (!id) throw new ErrorUsuario('Indica qué compraste.');
+    if (typeof marcado !== 'boolean') throw new ErrorUsuario('Indica si el artículo está comprado.');
     const extra = doc.extras.find((e) => e.id === id);
-    if (extra) extra.marcado = !!marcado;
-    else {
-      doc.marcados = doc.marcados.filter((x) => x !== id);
-      if (marcado) doc.marcados.push(id);
+    if (extra) extra.marcado = marcado;
+    const anteriores = doc.alimentosMarcados;
+    doc.alimentosMarcados = anteriores.filter((x) => x.id !== id);
+    if (marcado && !extra) {
+      const { secciones } = await listaCompras({ fecha, incluirLoQueTengo: true });
+      const item = Object.values(secciones).flat().find((i) => i.id === id && i.alimento);
+      if (item) doc.alimentosMarcados.push({ id, nombre: item.nombre, seccion: item.seccion });
     }
-    await store.put('compras', ini, doc);
+    doc.marcados = doc.marcados.filter((x) => x !== id);
+    if (marcado) doc.marcados.push(id);
+    await store.put('compras', doc.id, doc);
     return listaCompras({ fecha });
   }
 
-  async function agregarCompra({ fecha = hoyISO(), nombre, seccion }) {
-    if (!nombre) throw new ErrorUsuario('¿Qué quieres agregar a la lista?');
-    const ini = inicioSemana(fecha);
-    const doc = (await store.get('compras', ini)) || { id: ini, marcados: [], extras: [] };
-    for (const n of listaTexto(nombre)) {
-      const id = normalizar(n);
-      if (!doc.extras.some((e) => e.id === id)) doc.extras.push({ id, nombre: n, seccion: SECCIONES[seccion] ? seccion : seccionDe(n), marcado: false });
+  async function agregarCompra({ fecha = hoyISO(), nombre, seccion, alimento = false }) {
+    const nombres = listaTexto(nombre);
+    if (!nombres.length) throw new ErrorUsuario('¿Qué quieres agregar a la lista?');
+    const doc = await obtenerCompras(fecha);
+    for (const n of nombres) {
+      const id = idIngrediente(n);
+      if (id.length > 120) throw new ErrorUsuario('El nombre del artículo es demasiado largo.');
+      const existente = doc.extras.find((e) => e.id === id);
+      if (existente) {
+        if (alimento === true) existente.alimento = true;
+      } else {
+        doc.extras.push({ id, nombre: nombreIngrediente(n), seccion: Object.hasOwn(SECCIONES, seccion) ? seccion : seccionDe(n), marcado: false, alimento: alimento === true });
+      }
     }
-    await store.put('compras', ini, doc);
+    await store.put('compras', doc.id, doc);
     return listaCompras({ fecha });
   }
 
   async function quitarCompra({ fecha = hoyISO(), nombre }) {
-    const ini = inicioSemana(fecha);
-    const doc = (await store.get('compras', ini)) || { id: ini, marcados: [], extras: [] };
-    doc.extras = doc.extras.filter((e) => e.id !== normalizar(nombre));
-    await store.put('compras', ini, doc);
+    const doc = await obtenerCompras(fecha);
+    const id = idIngrediente(nombre);
+    doc.extras = doc.extras.filter((e) => e.id !== id);
+    await store.put('compras', doc.id, doc);
     return listaCompras({ fecha });
   }
 
+  async function pasarComprasAlRefri({ fecha = hoyISO() } = {}) {
+    const { secciones } = await listaCompras({ fecha, incluirLoQueTengo: true });
+    const alimentos = Object.values(secciones).flat().filter((i) => i.alimento && i.marcado);
+    if (alimentos.length) {
+      const doc = await obtenerCompras(fecha);
+      const ids = new Set(alimentos.map((i) => i.id));
+      await guardarRefri(alimentos.map((i) => i.nombre));
+      doc.marcados = doc.marcados.filter((id) => !ids.has(id));
+      doc.extras = doc.extras.filter((ex) => !ids.has(ex.id));
+      doc.alimentosMarcados = doc.alimentosMarcados.filter((i) => !ids.has(i.id));
+      await store.put('compras', doc.id, doc);
+    }
+    return { agregados: alimentos.map((i) => i.nombre), compras: await listaCompras({ fecha }) };
+  }
+
+  const mutar = (fn) => store.atomic
+    ? (...args) => store.atomic((tx) => crearCocina(tx)[fn.name](...args))
+    : fn;
+
   return {
-    obtenerConfig, guardarConfig,
-    listarPersonas, guardarPersona,
-    listarPlatillos, obtenerPlatillo, crearPlatillo, editarPlatillo, eliminarPlatillo, calificar,
-    obtenerSemana, asignar, sugerir, armarSemana, marcarHecho, desmarcarHecho, listarHistorial,
-    listarRefri, actualizarRefri, queHagoConLoQueTengo,
-    listaCompras, marcarCompra, agregarCompra, quitarCompra,
+    obtenerConfig, guardarConfig: mutar(guardarConfig),
+    listarPersonas, guardarPersona: mutar(guardarPersona),
+    listarPlatillos, obtenerPlatillo, usosFuturos,
+    crearPlatillo: mutar(crearPlatillo), editarPlatillo: mutar(editarPlatillo), archivarPlatillo: mutar(archivarPlatillo), calificar: mutar(calificar),
+    obtenerSemana, sugerir, listarHistorial,
+    asignar: mutar(asignar), armarSemana: mutar(armarSemana), marcarHecho: mutar(marcarHecho), desmarcarHecho: mutar(desmarcarHecho),
+    listarRefri, actualizarRefri: mutar(actualizarRefri), queHagoConLoQueTengo,
+    listaCompras, agregarCompra: mutar(agregarCompra), marcarCompra: mutar(marcarCompra), quitarCompra: mutar(quitarCompra), pasarComprasAlRefri: mutar(pasarComprasAlRefri),
   };
 }
