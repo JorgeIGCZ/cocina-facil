@@ -22,9 +22,7 @@ const CLAVE_MCP = process.env.MCP_KEY || (PRODUCCION ? '' : CLAVE);
 if (PRODUCCION && CLAVE_MCP && CLAVE_MCP === CLAVE) throw new Error('MCP_KEY debe ser distinta de APP_KEY.');
 
 const store = crearStore();
-await store.init();
 const cocina = crearCocina(store);
-if (await store.atomic((tx) => sembrar(tx, crearCocina(tx)))) console.log('Datos iniciales cargados.');
 
 const app = express();
 app.disable('x-powered-by');
@@ -149,7 +147,19 @@ app.use((err, req, res, next) => {
 });
 
 const HOST = process.env.HOST || (PRODUCCION ? '0.0.0.0' : '127.0.0.1');
-app.listen(PORT, HOST, (err) => {
-  if (err) { console.error('No se pudo iniciar Mi Cocina:', err.message); process.exit(1); }
-  console.log(`🍳 Mi Cocina en http://${HOST}:${PORT}`);
-});
+// Hostinger carga este módulo con require(), que no admite await en el nivel superior.
+async function arrancar() {
+  await store.init();
+  if (await store.atomic((tx) => sembrar(tx, crearCocina(tx)))) console.log('Datos iniciales cargados.');
+  const server = app.listen(PORT, HOST, (err) => {
+    if (err) { fallarArranque(err); return; }
+    console.log(`🍳 Mi Cocina en http://${HOST}:${server.address().port}`);
+  });
+}
+
+function fallarArranque(err) {
+  console.error('No se pudo iniciar Mi Cocina:', err.message);
+  process.exit(1);
+}
+
+void arrancar().catch(fallarArranque);
