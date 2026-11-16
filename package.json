@@ -1,0 +1,20 @@
+{
+  "name": "mi-cocina",
+  "version": "1.0.0",
+  "description": "Planeador de comidas familiar con conector MCP para Meta Muse",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.20.2",
+    "express": "5.1.0",
+    "mysql2": "3.15.3",
+    "zod": "3.25.76"
+  }
+}

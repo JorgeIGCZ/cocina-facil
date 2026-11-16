@@ -1,0 +1,9 @@
+{
+  "name": "Mi Cocina",
+  "short_name": "Mi Cocina",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f1fb",
+  "theme_color": "#f7f1fb",
+  "icons": [{ "src": "/icono.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
