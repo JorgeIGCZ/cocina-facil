@@ -34,7 +34,7 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
   extensions: ['html'],
   maxAge: '1h',
   setHeaders(res, archivo) {
-    if (['.html', '.js', '.css'].includes(path.extname(archivo))) res.setHeader('Cache-Control', 'no-cache');
+    if (['.html', '.js', '.css', '.webmanifest'].includes(path.extname(archivo))) res.setHeader('Cache-Control', 'no-cache');
   },
 }));
 

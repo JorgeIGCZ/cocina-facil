@@ -109,6 +109,85 @@ function cerrarSheet() {
   $('#sheet').close();
 }
 
+// ---------- agregar a la pantalla de inicio ----------
+const modoApp = window.matchMedia('(display-mode: standalone)');
+let avisoInstalacion;
+let instaladaEnEstaPestana = false;
+const enApp = () => instaladaEnEstaPestana || modoApp.matches || navigator.standalone === true;
+const puedeInstalar = () => typeof navigator.install === 'function' || Boolean(avisoInstalacion);
+const etiquetaInstalar = () => puedeInstalar() ? 'Instalar app' : 'Agregar a inicio';
+
+function botonInstalar(extra = '') {
+  if (enApp()) return '';
+  return `<button type="button" class="btn sec instalar-app ${extra}" data-instalar>${etiquetaInstalar()}</button>`;
+}
+
+function actualizarBotonesInstalar() {
+  document.querySelectorAll('[data-instalar]').forEach((boton) => {
+    boton.hidden = enApp();
+    boton.textContent = etiquetaInstalar();
+  });
+}
+
+function instruccionesInstalar() {
+  const ua = navigator.userAgent;
+  const esAppleMovil = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let pasos = '<p>Abre Mi Cocina en tu celular para agregarla a la pantalla de inicio.</p>';
+  if (esAppleMovil) {
+    pasos = `<ol>
+      <li>Abre esta página en Safari y toca <b>Compartir</b>.</li>
+      <li>Elige <b>Agregar a Inicio</b>.</li>
+      <li>Si aparece <b>Abrir como app web</b>, actívalo. Luego toca <b>Agregar</b>.</li>
+    </ol>`;
+  } else if (/Android/i.test(ua)) {
+    pasos = `<ol>
+      <li>Abre esta página en Chrome y toca el menú <b>⋮</b>.</li>
+      <li>Elige <b>Instalar y crear acceso directo</b> o <b>Agregar a la pantalla de inicio</b>.</li>
+      <li>Toca <b>Instalar</b> y sigue los pasos del navegador.</li>
+    </ol>`;
+  }
+  abrirSheet(`
+    <div class="sheet-tit"><h2>Agregar Mi Cocina a inicio</h2><button type="button" class="icono" data-cerrar>✕</button></div>
+    <div class="pasos-instalar">${pasos}</div>
+  `);
+}
+
+window.addEventListener('beforeinstallprompt', (evento) => {
+  evento.preventDefault();
+  avisoInstalacion = evento;
+  actualizarBotonesInstalar();
+});
+window.addEventListener('appinstalled', () => {
+  instaladaEnEstaPestana = true;
+  avisoInstalacion = undefined;
+  actualizarBotonesInstalar();
+});
+modoApp.addEventListener?.('change', actualizarBotonesInstalar);
+
+document.addEventListener('click', async (e) => {
+  const boton = e.target.closest('[data-instalar]');
+  if (!boton || boton.hasAttribute('aria-disabled') || enApp()) return;
+  if (!puedeInstalar()) { instruccionesInstalar(); return; }
+  boton.setAttribute('aria-disabled', 'true');
+  try {
+    if (typeof navigator.install === 'function') {
+      await navigator.install();
+      instaladaEnEstaPestana = true;
+    } else {
+      const evento = avisoInstalacion;
+      avisoInstalacion = undefined;
+      await evento.prompt();
+      instaladaEnEstaPestana = (await evento.userChoice).outcome === 'accepted';
+    }
+    if (instaladaEnEstaPestana) toast('Mi Cocina está lista para abrir desde su ícono');
+  } catch (error) {
+    if (error.name !== 'AbortError') instruccionesInstalar();
+  } finally {
+    boton.removeAttribute('aria-disabled');
+    actualizarBotonesInstalar();
+  }
+});
+
 function estrellasHtml(valor, attrs = '') {
   return `<span class="estrellas" ${attrs}>${[1, 2, 3, 4, 5].map((n) => `<button type="button" data-estrella="${n}" class="${n <= (valor || 0) ? 'on' : ''}" aria-label="${n === 1 ? '1 estrella' : `${n} estrellas`}" aria-pressed="${n === valor}">★</button>`).join('')}</span>`;
 }
@@ -141,6 +220,7 @@ function pintarLogin(error) {
         ${error ? `<p style="color:var(--rosa);font-weight:700">${esc(error)}</p>` : ''}
         <button class="btn ancho" style="margin-top:12px">Entrar</button>
       </form>
+      ${botonInstalar('ancho')}
     </div></div>`;
   $('#f-login').addEventListener('submit', accion(async (e) => {
     estado.clave = new FormData(e.target).get('clave').trim();
@@ -199,6 +279,7 @@ async function vistaSemana(semanaInicial) {
   app.innerHTML = `
     <div class="cabecera">
       <h1>Mi Cocina <span class="chispa" aria-hidden="true">✦</span></h1>
+      ${botonInstalar()}
     </div>
     ${hoy ? `<section aria-labelledby="titulo-hoy">
       <h2 id="titulo-hoy">${hoy.cocina ? '¿Qué cocino hoy?' : 'Hoy es día libre'}</h2>
@@ -604,7 +685,6 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
         <button type="button" class="chip ${p.etiquetas.includes('adultos') ? 'on' : ''}" data-e="adultos">🍷 De adultos</button>
       </div>
       <label class="campo">Notas<textarea name="notas" rows="2">${esc(p.notas)}</textarea></label>
-      <label class="campo">Veces anotadas en la libreta<input type="number" name="vecesPrevias" min="0" max="999999" step="1" required value="${p.vecesPrevias || 0}"></label>
       <h3>¿Cuánto les gusta?</h3>
       ${estado.personas.map((per) => `<div class="persona-estrellas"><span>${esc(per.emoji)} ${esc(per.nombre)}</span>${estrellasHtml(p.calificaciones?.[per.id], `data-persona="${per.id}" data-valor="${p.calificaciones?.[per.id] || 0}"`)}</div>`).join('')}
       <button class="btn ancho" style="margin-top:14px">Guardar</button>
@@ -630,7 +710,6 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
       ingredientes: f.get('ingredientes'), guarniciones: f.get('guarniciones'), notas: f.get('notas'),
       tipos: [...sheet.querySelectorAll('#tipos .on')].map((b) => b.dataset.t),
       etiquetas: [...sheet.querySelectorAll('#etiquetas .on')].map((b) => b.dataset.e),
-      vecesPrevias: Number(f.get('vecesPrevias')),
     };
     if (!datos.tipos.length) throw new Error('Elige al menos desayuno, comida o cena.');
     const estrellas = {};
