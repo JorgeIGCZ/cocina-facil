@@ -159,6 +159,44 @@ test('los alias de datos previos se agrupan y solo los alimentos comprados pasan
   assert((await items()).some((i) => i.id === 'muslo con pierna' && !i.marcado));
 });
 
+test('platillos, sugerencias y compras distinguen qué hay, qué falta y qué queda por revisar', async (t) => {
+  const { store, cocina } = await preparar(t);
+  const fecha = siguienteLunes();
+  const p = await cocina.crearPlatillo({ nombre: 'Pollo con ajo de prueba', ingredientes: ['ajo', 'm/p', 'jitomate'], categoria: 'prueba' });
+  await store.put('refri', 'muslo con pierna', { id: 'muslo con pierna', nombre: 'muslo con pierna', tengo: false });
+  await cocina.actualizarRefri({ tengo: ['ajo'] });
+
+  const { stats } = await cocina.obtenerPlatillo(p.id);
+  assert.equal(stats.tienes, 1);
+  assert.deepEqual(stats.faltan, ['muslo con pierna']);
+  assert.deepEqual(stats.porRevisar, ['jitomate']);
+  assert.deepEqual(stats.ingredientes.map((i) => i.estado), ['tengo', 'falta', 'revisar']);
+  const medioPollo = (await cocina.listarRefri()).find((i) => i.id === 'muslo con pierna');
+  assert.equal(medioPollo.estado, 'falta');
+  assert(medioPollo.alias.includes('m/p'));
+
+  await cocina.asignar({ ...comida(fecha), platillo: p.id });
+  const [sugerencia] = await cocina.sugerir({ fecha, categoria: 'prueba' });
+  assert.equal(sugerencia.totalIngredientes, 3);
+  assert.deepEqual(sugerencia.faltan, ['muslo con pierna']);
+  assert.deepEqual(sugerencia.porRevisar, ['jitomate']);
+  const idea = (await cocina.queHagoConLoQueTengo({ cantidad: 20 })).find((i) => i.id === p.id);
+  assert.equal(idea.total, 3);
+  assert.deepEqual(idea.porRevisar, ['jitomate']);
+
+  const compras = async () => Object.values((await cocina.listaCompras({ fecha })).secciones).flat();
+  const lista = await compras();
+  assert(!lista.some((i) => i.nombre === 'ajo'));
+  assert.equal(lista.find((i) => i.nombre === 'muslo con pierna').estadoCasa, 'falta');
+  assert.equal(lista.find((i) => i.nombre === 'jitomate').estadoCasa, 'revisar');
+  await cocina.actualizarRefri({ porRevisar: ['m/p'] });
+  assert.equal((await compras()).find((i) => i.nombre === 'muslo con pierna').estadoCasa, 'revisar');
+  await cocina.marcarCompra({ fecha, nombre: 'm/p' });
+  assert.deepEqual((await cocina.pasarComprasAlRefri({ fecha })).agregados, ['muslo con pierna']);
+  assert.equal((await cocina.obtenerPlatillo(p.id)).stats.tienes, 2);
+  assert(!(await compras()).some((i) => i.nombre === 'muslo con pierna'));
+});
+
 test('las fechas inexistentes y los registros futuros se rechazan', async (t) => {
   const { cocina } = await preparar(t);
   for (const fecha of ['2026-02-30', '2026-13-01']) {

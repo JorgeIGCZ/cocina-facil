@@ -1,6 +1,8 @@
 # 🍳 Mi Cocina
 
-Planeador de comidas familiar: plan semanal, sugerencias inteligentes, estrellas por persona, refri, lista del súper e historial. Incluye un **conector MCP** para usarlo desde **Meta Muse**.
+Planeador de comidas familiar: plan semanal, sugerencias inteligentes, estrellas por persona, ingredientes en casa, lista del súper e historial. Incluye un **conector MCP** para usarlo desde **Meta Muse**.
+
+Al editar un platillo, busca ingredientes que ya se usan en la app o agrega uno nuevo. En **En casa** puedes marcar cada ingrediente como «Tengo», «Por revisar» o «Me falta». Lo confirmado como disponible desaparece de la lista automática del súper.
 
 ## Correr en local
 
@@ -16,7 +18,7 @@ Usa `npm test` para ejecutar las regresiones del plan, las estrellas y la lista 
 
 | Archivo | Qué hace |
 |---|---|
-| `src/domain.js` | Toda la lógica: sugerencias, plan, súper, refri, historial |
+| `src/domain.js` | Toda la lógica: sugerencias, plan, súper, ingredientes en casa e historial |
 | `src/seed.js` | Platillos iniciales sacados de sus libretas |
 | `src/store.js` | Almacenamiento: archivo JSON (local) o MySQL (Hostinger) |
 | `src/server.js` | API REST (`/api/*`), conector MCP (`/mcp`) y webapp |

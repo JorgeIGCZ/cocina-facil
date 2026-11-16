@@ -36,6 +36,11 @@ const ALIAS_INGREDIENTES = new Map([
 ]);
 const idIngrediente = (nombre) => { const id = normalizar(nombre); return ALIAS_INGREDIENTES.get(id) || id; };
 const nombreIngrediente = (nombre) => ALIAS_INGREDIENTES.get(normalizar(nombre)) || nombre;
+const aliasPorId = new Map();
+for (const [alias, id] of ALIAS_INGREDIENTES) {
+  if (!aliasPorId.has(id)) aliasPorId.set(id, []);
+  aliasPorId.get(id).push(alias);
+}
 
 export function hoyISO() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
@@ -95,10 +100,10 @@ function mapaRefri(refri) {
     const id = idIngrediente(item.nombre || item.id);
     const previo = porId.get(id);
     if (previo?.canonico && item.id !== id) continue;
-    porId.set(id, {
-      id, nombre: nombreIngrediente(item.nombre || item.id), canonico: item.id === id,
-      tengo: Boolean(item.tengo || (item.id !== id && previo?.tengo)),
-    });
+    const canonico = item.id === id;
+    const estado = item.estado || (item.tengo ? 'tengo' : 'falta');
+    const estadoUnido = !canonico && previo?.estado === 'tengo' ? previo.estado : estado;
+    porId.set(id, { id, nombre: nombreIngrediente(item.nombre || item.id), canonico, estado: estadoUnido });
   }
   return porId;
 }
@@ -160,12 +165,10 @@ export function crearCocina(store) {
     const [platillos, historial, personas, refri] = await Promise.all([
       store.all('platillos'), store.all('historial'), listarPersonas(), store.all('refri'),
     ]);
-    const inventario = mapaRefri(refri);
-    const tengo = new Set([...inventario.values()].filter((r) => r.tengo).map((r) => r.id));
-    return { platillos, historial, personas, tengo, inventario };
+    return { platillos, historial, personas, inventario: mapaRefri(refri) };
   }
 
-  function estadisticas(p, { historial, personas, tengo }, hoy = hoyISO()) {
+  function estadisticas(p, { historial, personas, inventario }, hoy = hoyISO()) {
     const fechas = new Map();
     for (const h of historial) if (h.platilloId === p.id && h.fecha <= hoy) fechas.set(`${h.fecha}_${h.comida}`, h.fecha);
     const hechos = [...fechas.values()].sort((a, b) => b.localeCompare(a));
@@ -176,8 +179,10 @@ export function crearCocina(store) {
     const puntaje = califs.length ? califs.reduce((s, c) => s + c.estrellas, 0) / califs.length : null;
     const ninos = califs.filter((c) => c.persona.rol === 'nino');
     const puntajeNinos = ninos.length ? ninos.reduce((s, c) => s + c.estrellas, 0) / ninos.length : null;
-    const ingr = porIngrediente(p.ingredientes || []);
-    const tieneIngr = ingr.filter((i) => tengo.has(idIngrediente(i)));
+    const ingredientes = porIngrediente(p.ingredientes || []).map((nombre) => {
+      const id = idIngrediente(nombre);
+      return { id, nombre, estado: inventario.get(id)?.estado || 'revisar' };
+    });
     return {
       veces: (p.vecesPrevias || 0) + hechos.length,
       vecesUltimos30: hechos.filter((f) => diasEntre(f, hoy) <= 30).length,
@@ -185,8 +190,10 @@ export function crearCocina(store) {
       diasDesde: ultimaVez ? diasEntre(ultimaVez, hoy) : null,
       puntaje: puntaje == null ? null : Math.round(puntaje * 10) / 10,
       puntajeNinos: puntajeNinos == null ? null : Math.round(puntajeNinos * 10) / 10,
-      tienes: tieneIngr.length,
-      faltan: ingr.filter((i) => !tengo.has(idIngrediente(i))),
+      ingredientes,
+      tienes: ingredientes.filter((i) => i.estado === 'tengo').length,
+      faltan: ingredientes.filter((i) => i.estado === 'falta').map((i) => i.nombre),
+      porRevisar: ingredientes.filter((i) => i.estado === 'revisar').map((i) => i.nombre),
     };
   }
 
@@ -479,7 +486,7 @@ export function crearCocina(store) {
       if (enSemana.has(p.id)) { puntos -= 45; razones.push('ya está esta semana'); }
       if (catVecinas.has(p.categoria)) { puntos -= 15; razones.push(`ayer o mañana también hay ${p.categoria}`); }
       // Refri
-      const totalIngredientes = st.tienes + st.faltan.length;
+      const totalIngredientes = st.ingredientes.length;
       if (usarRefri && totalIngredientes) {
         const frac = st.tienes / totalIngredientes;
         puntos += frac * 20;
@@ -492,7 +499,10 @@ export function crearCocina(store) {
       if (hayNinos && (p.etiquetas || []).includes('adultos')) { puntos -= 20; razones.push('es más de adultos'); }
       if (hayNinos && (p.etiquetas || []).includes('ninos')) { puntos += 10; razones.push('favorito de los niños'); }
       if (aleatorio) puntos += Math.random() * 10;
-      return { platillo: { id: p.id, nombre: p.nombre, categoria: p.categoria, tiempo: p.tiempo, guarniciones: p.guarniciones || [] }, puntos: Math.round(puntos), razones, faltan: st.faltan, totalIngredientes, puntajeNinos: st.puntajeNinos };
+      return {
+        platillo: { id: p.id, nombre: p.nombre, categoria: p.categoria, tiempo: p.tiempo, guarniciones: p.guarniciones || [] },
+        puntos: Math.round(puntos), razones, faltan: st.faltan, porRevisar: st.porRevisar, totalIngredientes, puntajeNinos: st.puntajeNinos,
+      };
     }).sort((a, b) => b.puntos - a.puntos);
 
     return resultado.slice(0, Math.max(1, Math.min(Number(cantidad) || 3, 20)));
@@ -539,7 +549,7 @@ export function crearCocina(store) {
       if (!s.platos.some((pl) => pl.platilloId === p.id)) throw new ErrorUsuario(`«${p.nombre}» no está en esta comida.`);
       await calificar(p.id, porPersona);
     }
-    if (seAcabo?.length) await guardarRefri([], seAcabo);
+    if (seAcabo?.length) await guardarRefri({ seAcabo });
     const platillos = new Map((await store.all('platillos')).map((p) => [p.id, p]));
     const existentes = (await store.all('historial')).filter((h) => h.fecha === fecha && h.comida === comida);
     for (const h of existentes) await store.del('historial', h.id);
@@ -578,31 +588,34 @@ export function crearCocina(store) {
   // ---- refri ----
   async function listarRefri() {
     const [platillos, refri] = await Promise.all([store.all('platillos'), store.all('refri')]);
+    const inventario = mapaRefri(refri);
     const items = new Map();
     for (const p of platillos.filter((p) => !p.archivado)) for (const i of porIngrediente([...(p.ingredientes || []), ...(p.guarniciones || [])])) {
       const id = idIngrediente(i);
-      if (!items.has(id)) items.set(id, { id, nombre: i, seccion: seccionDe(i), tengo: false, usos: 0 });
-      items.get(id).usos++;
+      const anterior = items.get(id);
+      items.set(id, { nombre: anterior?.nombre || i, usos: (anterior?.usos || 0) + 1 });
     }
-    for (const r of mapaRefri(refri).values()) {
-      if (!items.has(r.id)) items.set(r.id, { id: r.id, nombre: r.nombre, seccion: seccionDe(r.nombre), tengo: false, usos: 0 });
-      items.get(r.id).tengo = !!r.tengo;
+    for (const r of inventario.values()) {
+      if (!items.has(r.id)) items.set(r.id, { nombre: r.nombre, usos: 0 });
     }
-    return [...items.values()].sort((a, b) => b.usos - a.usos || a.nombre.localeCompare(b.nombre, 'es'));
+    return [...items].map(([id, item]) => {
+      const estado = inventario.get(id)?.estado || 'revisar';
+      return { ...item, id, seccion: seccionDe(item.nombre), estado, tengo: estado === 'tengo', alias: aliasPorId.get(id) || [] };
+    }).sort((a, b) => b.usos - a.usos || a.nombre.localeCompare(b.nombre, 'es'));
   }
 
-  async function actualizarRefri({ tengo = [], seAcabo = [] } = {}) {
-    await guardarRefri(tengo, seAcabo);
+  async function actualizarRefri(cambios = {}) {
+    await guardarRefri(cambios);
     return (await listarRefri()).filter((r) => r.tengo).map((r) => r.nombre);
   }
 
-  async function guardarRefri(tengo = [], seAcabo = []) {
+  async function guardarRefri({ tengo = [], seAcabo = [], porRevisar = [] }) {
     const cambios = new Map();
-    for (const [nombres, hay] of [[tengo, true], [seAcabo, false]]) {
+    for (const [nombres, estado] of [[tengo, 'tengo'], [seAcabo, 'falta'], [porRevisar, 'revisar']]) {
       for (const n of listaTexto(nombres)) {
         const id = idIngrediente(n);
         if (id.length > 120) throw new ErrorUsuario('El nombre del ingrediente es demasiado largo.');
-        cambios.set(id, { id, nombre: nombreIngrediente(n.toLowerCase()), tengo: hay });
+        cambios.set(id, { id, nombre: nombreIngrediente(n.toLowerCase()), estado, tengo: estado === 'tengo' });
       }
     }
     for (const [id, item] of cambios) await store.put('refri', id, item);
@@ -615,7 +628,7 @@ export function crearCocina(store) {
       .filter((p) => !p.archivado && (p.tipos || []).includes(comida) && (p.ingredientes || []).length)
       .map((p) => {
         const st = estadisticas(p, ctx);
-        return { platillo: p.nombre, id: p.id, tienes: st.tienes, total: st.tienes + st.faltan.length, faltan: st.faltan, puntaje: st.puntaje };
+        return { platillo: p.nombre, id: p.id, tienes: st.tienes, total: st.ingredientes.length, faltan: st.faltan, porRevisar: st.porRevisar, puntaje: st.puntaje };
       })
       .filter((x) => x.tienes > 0)
       .sort((a, b) => (b.tienes / b.total) - (a.tienes / a.total) || (b.puntaje || 0) - (a.puntaje || 0))
@@ -656,8 +669,9 @@ export function crearCocina(store) {
           const p = porId.get(pl.platilloId);
           for (const ing of porIngrediente([...(p?.ingredientes || []), ...(pl.guarniciones || [])])) {
             const id = idIngrediente(ing);
-            if (!incluirLoQueTengo && inventario.get(id)?.tengo) continue;
-            if (!items.has(id)) items.set(id, { id, nombre: ing, seccion: seccionDe(ing), para: [], marcado: marcados.has(id), alimento: true });
+            const estadoCasa = inventario.get(id)?.estado || 'revisar';
+            if (!incluirLoQueTengo && estadoCasa === 'tengo') continue;
+            if (!items.has(id)) items.set(id, { id, nombre: ing, seccion: seccionDe(ing), para: [], marcado: marcados.has(id), alimento: true, estadoCasa });
             const it = items.get(id);
             if (!it.para.includes(pl.nombre)) it.para.push(pl.nombre);
           }
@@ -666,7 +680,7 @@ export function crearCocina(store) {
     }
     // Una compra ya realizada sigue disponible aunque cambie el plan.
     for (const item of doc.alimentosMarcados) {
-      if (items.has(item.id) || (!incluirLoQueTengo && inventario.get(item.id)?.tengo)) continue;
+      if (items.has(item.id) || (!incluirLoQueTengo && inventario.get(item.id)?.estado === 'tengo')) continue;
       items.set(item.id, { ...item, marcado: true, alimento: true });
     }
     for (const ex of doc.extras) {
@@ -681,7 +695,9 @@ export function crearCocina(store) {
     }
     const secciones = Object.fromEntries(Object.keys(SECCIONES).map((k) => [k, []]));
     for (const it of items.values()) secciones[it.seccion].push(it);
-    for (const k of Object.keys(secciones)) secciones[k].sort((a, b) => a.marcado - b.marcado || a.nombre.localeCompare(b.nombre, 'es'));
+    for (const k of Object.keys(secciones)) secciones[k].sort((a, b) => a.marcado - b.marcado
+      || Number(!a.extra && a.estadoCasa === 'revisar') - Number(!b.extra && b.estadoCasa === 'revisar')
+      || a.nombre.localeCompare(b.nombre, 'es'));
     return { semana: semana.inicio, secciones, nombresSecciones: SECCIONES };
   }
 
@@ -737,7 +753,7 @@ export function crearCocina(store) {
     if (alimentos.length) {
       const doc = await obtenerCompras(fecha);
       const ids = new Set(alimentos.map((i) => i.id));
-      await guardarRefri(alimentos.map((i) => i.nombre));
+      await guardarRefri({ tengo: alimentos.map((i) => i.nombre) });
       doc.marcados = doc.marcados.filter((id) => !ids.has(id));
       doc.extras = doc.extras.filter((ex) => !ids.has(ex.id));
       doc.alimentosMarcados = doc.alimentosMarcados.filter((i) => !ids.has(i.id));

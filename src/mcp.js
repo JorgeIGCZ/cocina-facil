@@ -42,7 +42,7 @@ export function crearServidorMcp(cocina) {
       puntaje: p.stats.puntaje, puntajeNinos: p.stats.puntajeNinos, veces: p.stats.veces, ultimaVez: p.stats.ultimaVez, etiquetas: p.etiquetas, archivado: Boolean(p.archivado),
     })), lectura);
 
-  herramienta('ver_platillo', 'Detalle del platillo, sus estrellas, ingredientes faltantes y comidas futuras que lo incluyen.',
+  herramienta('ver_platillo', 'Detalle del platillo, sus estrellas, ingredientes disponibles, faltantes o por revisar, y comidas futuras que lo incluyen.',
     { platillo: z.string().describe('Nombre o id') }, async (a) => {
       const p = await cocina.obtenerPlatillo(a.platillo);
       return { ...p, usosFuturos: await cocina.usosFuturos(p.id) };
@@ -129,21 +129,28 @@ export function crearServidorMcp(cocina) {
   }, (a) => cocina.listarHistorial(a), lectura);
 
   // --- refri ---
-  herramienta('ver_refri', 'Ingredientes que hay en casa ahora.', {},
-    async () => (await cocina.listarRefri()).filter((r) => r.tengo).map((r) => r.nombre), lectura);
-  herramienta('actualizar_refri', 'Marca ingredientes que sí hay (tengo) o que se acabaron (seAcabo).', {
-    tengo: z.array(z.string()).optional(), seAcabo: z.array(z.string()).optional(),
+  herramienta('ver_refri', 'Ingredientes que hay en casa. Usa incluirTodos para ver también qué falta y qué está por revisar.', {
+    incluirTodos: z.boolean().optional(),
+  }, async ({ incluirTodos }) => {
+    const items = await cocina.listarRefri();
+    return incluirTodos ? items.map(({ nombre, estado }) => ({ nombre, estado })) : items.filter((r) => r.tengo).map((r) => r.nombre);
+  }, lectura);
+  herramienta('actualizar_refri', 'Actualiza qué ingredientes hay en casa, qué falta o qué queda pendiente de revisar.', {
+    tengo: z.array(z.string()).optional(), seAcabo: z.array(z.string()).optional(), porRevisar: z.array(z.string()).optional(),
   }, (a) => cocina.actualizarRefri(a));
-  herramienta('que_hago_con_lo_que_tengo', 'Platillos que se pueden hacer con lo que hay en el refri.', {
+  herramienta('que_hago_con_lo_que_tengo', 'Ideas de platillos según lo que hay en casa, lo que falta y lo que queda por revisar.', {
     comida: comida.optional(), cantidad: z.number().int().min(1).max(15).optional(),
   }, (a) => cocina.queHagoConLoQueTengo(a), lectura);
 
   // --- súper ---
-  herramienta('lista_super', 'Lista del súper de la semana: ingredientes de lo planeado que no hay en el refri, más extras. Agrupada por carnicería, verdura y súper.', {
+  herramienta('lista_super', 'Lista del súper de la semana: lo que falta, lo que queda por revisar y los extras. Agrupada por carnicería, verdura y súper.', {
     fecha: fecha.optional(),
   }, async (a) => {
     const l = await cocina.listaCompras(a);
-    return Object.fromEntries(Object.entries(l.secciones).map(([k, items]) => [SECCIONES[k], items.map((i) => `${i.marcado ? '✔ ' : ''}${i.nombre}`)]));
+    return Object.fromEntries(Object.entries(l.secciones).map(([k, items]) => [
+      SECCIONES[k],
+      items.map((i) => `${i.marcado ? '✔ ' : ''}${i.nombre}${!i.marcado && !i.extra && i.estadoCasa === 'revisar' ? ' (por revisar en casa)' : ''}`),
+    ]));
   }, lectura);
   herramienta('agregar_al_super', 'Agrega cosas extra a la lista del súper (también no comestibles: papel de baño, etc.).', {
     nombres: z.array(z.string()), seccion: z.enum(Object.keys(SECCIONES)).optional(), fecha: fecha.optional(),

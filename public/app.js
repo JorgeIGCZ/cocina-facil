@@ -19,6 +19,7 @@ const CATEGORIAS = Object.keys(CAT_ICONO);
 const TIEMPOS = { rapido: '⚡ Rápido', medio: '⏱️ Medio', largo: '🕰️ Largo' };
 const DIAS_CORTOS = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 const MESES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+const ESTADOS_INGREDIENTE = { tengo: 'Tengo', revisar: 'Por revisar', falta: 'Me falta' };
 
 const estado = {
   clave: lsGet('clave'),
@@ -33,7 +34,20 @@ const hoyISO = () => estado.hoy;
 const sumarDias = (iso, n) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 const diaNum = (iso) => Number(iso.slice(8, 10));
 const mesCorto = (iso) => MESES[Number(iso.slice(5, 7)) - 1];
-const normalizar = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const normalizar = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim().replace(/\s+/g, ' ');
+const nombresIngrediente = (i) => [normalizar(i.nombre), ...(i.alias || [])];
+
+function estadoIngredienteHtml(valor) {
+  const estado = Object.hasOwn(ESTADOS_INGREDIENTE, valor) ? valor : 'revisar';
+  return `<span class="estado-ingrediente estado-ing-${estado}">${ESTADOS_INGREDIENTE[estado]}</span>`;
+}
+
+function resumenIngredientes({ faltan = [], porRevisar = [] }) {
+  return [
+    faltan.length && `<span class="detalle-ingrediente estado-ing-falta"><b>Falta:</b> ${esc(faltan.join(', '))}</span>`,
+    porRevisar.length && `<span class="detalle-ingrediente estado-ing-revisar"><b>Por revisar:</b> ${esc(porRevisar.join(', '))}</span>`,
+  ].filter(Boolean).join('');
+}
 
 async function api(metodo, ruta, cuerpo) {
   let r;
@@ -241,7 +255,7 @@ async function irA(tab, semanaInicial) {
     else b.removeAttribute('aria-current');
   });
   window.scrollTo(0, 0);
-  try { await ({ semana: vistaSemana, platillos: vistaPlatillos, refri: vistaRefri, super: vistaSuper, mas: vistaMas })[tab](semanaInicial); }
+  try { await ({ semana: vistaSemana, platillos: vistaPlatillos, refri: vistaEnCasa, super: vistaSuper, mas: vistaMas })[tab](semanaInicial); }
   catch (error) { if (estado.tab === tab) mostrarReintento($('#app'), () => irA(tab), error); }
 }
 
@@ -376,7 +390,7 @@ function sugerenciaHtml(x) {
   return `<button class="sug" data-elegir="${x.platillo.id}">
     <span class="nombre">${esc(CAT_ICONO[x.platillo.categoria] || '🍽️')} ${esc(x.platillo.nombre)}</span>
     <span class="razones">${esc(x.razones.join(' · '))}</span>
-    ${x.totalIngredientes ? `<span class="razones">${x.faltan.length ? `Falta: ${esc(x.faltan.join(', '))}` : 'Tienes los ingredientes principales'}</span>` : ''}
+    ${x.totalIngredientes ? resumenIngredientes(x) || '<span class="razones">Tienes los ingredientes principales</span>' : ''}
   </button>`;
 }
 
@@ -477,7 +491,7 @@ async function hojaSlot(fecha, comida, opciones = {}) {
   })));
   sheet.querySelector('[data-hecho]')?.addEventListener('click', accion(() => hojaHecho(fecha, comida, s)));
   sheet.querySelector('[data-deshacer]')?.addEventListener('click', accion(async () => {
-    if (!confirm('¿Quitar esta comida del historial? Sus estrellas y el refri se pueden corregir por separado.')) return;
+    if (!confirm('¿Quitar esta comida del historial? Puedes corregir las estrellas en Platillos y los ingredientes en En casa.')) return;
     await api('DELETE', `/plan/${fecha}/${comida}/hecho`); await refrescarSemana(); await recargar();
   }));
   sheet.querySelectorAll('[data-modo]').forEach((b) => b.addEventListener('click', accion(() => recargar({ modo: b.dataset.modo }))));
@@ -588,7 +602,7 @@ async function hojaHecho(fecha, comida, s) {
           return `<div class="persona-estrellas"><span>${esc(per.emoji)} ${esc(per.nombre)}</span>${estrellasHtml(d.calificaciones?.[pid], `data-persona="${pid}" data-valor="${d.calificaciones?.[pid] || 0}"`)}</div>`; }).join('')}
       </div>`;
     }).join('')}
-    ${ingredientes.length ? `<h3>¿Se acabó algo?</h3><div class="ayuda" style="margin-bottom:6px">Lo quito de tu refri</div>
+    ${ingredientes.length ? `<h3>¿Se acabó algo?</h3><div class="ayuda" style="margin-bottom:6px">Lo marco como «Me falta» en En casa.</div>
       <div class="chips">${ingredientes.map((i) => `<button class="chip" data-acabo="${esc(i)}">${esc(i)}</button>`).join('')}</div>` : ''}
     <button class="btn ancho" data-guardar style="margin-top:8px">Guardar ✅</button>`);
   sheet.querySelectorAll('[data-acabo]').forEach((b) => b.addEventListener('click', () => b.classList.toggle('on')));
@@ -665,8 +679,73 @@ async function vistaPlatillos() {
   pintar();
 }
 
+function editarIngredientes(sheet, iniciales, catalogo) {
+  const elegidos = new Map(iniciales.map((i) => [i.id, i]));
+  const campo = $('#buscar-ingrediente', sheet);
+  const seleccion = $('#ingredientes-elegidos', sheet);
+  const opciones = $('#opciones-ingredientes', sheet);
+  const porId = new Map(catalogo.map((i) => [i.id, i]));
+
+  const pintar = () => {
+    seleccion.innerHTML = [...elegidos.values()].map((i) => `<li class="ingrediente-elegido">
+      <span>${esc(i.nombre)}</span>
+      ${estadoIngredienteHtml(i.estado)}
+      <button type="button" class="quitar quitar-ingrediente" data-quitar-ingrediente="${esc(i.id)}" aria-label="Quitar ${esc(i.nombre)}">✕</button>
+    </li>`).join('');
+    seleccion.hidden = !elegidos.size;
+    const texto = normalizar(campo.value);
+    const disponibles = texto ? catalogo.filter((i) => !elegidos.has(i.id) && nombresIngrediente(i).some((n) => n.includes(texto))).slice(0, 6) : [];
+    const existe = catalogo.some((i) => nombresIngrediente(i).includes(texto)) || elegidos.has(texto);
+    const nuevo = texto && !existe ? `<li><button type="button" class="btn sec ancho" data-ingrediente-nuevo>Agregar «${esc(campo.value.trim())}»</button></li>` : '';
+    opciones.innerHTML = disponibles.map((i) => `<li><button type="button" class="opcion-ingrediente" data-opcion-ingrediente="${esc(i.id)}">
+      <span>${esc(i.nombre)}</span>${estadoIngredienteHtml(i.estado)}
+    </button></li>`).join('') + nuevo;
+    opciones.hidden = !opciones.children.length;
+    $('#sin-opciones-ingrediente', sheet).hidden = !(texto && existe && !disponibles.length);
+  };
+  const agregar = (item) => {
+    elegidos.set(item.id, item);
+    campo.value = '';
+    pintar();
+    campo.focus();
+  };
+  const agregarNuevo = () => {
+    const nombre = campo.value.trim();
+    if (!nombre) return;
+    agregar({ id: normalizar(nombre), nombre, estado: 'revisar' });
+  };
+  campo.addEventListener('input', pintar);
+  campo.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    e.preventDefault();
+    const texto = normalizar(campo.value);
+    if (!texto) return;
+    const exacto = catalogo.find((i) => nombresIngrediente(i).includes(texto));
+    if (exacto && !elegidos.has(exacto.id)) agregar(exacto);
+    else if (!opciones.querySelector('[data-opcion-ingrediente]') && opciones.querySelector('[data-ingrediente-nuevo]')) agregarNuevo();
+    else opciones.querySelector('button')?.focus();
+  });
+  opciones.addEventListener('click', (e) => {
+    const opcion = e.target.closest('[data-opcion-ingrediente]');
+    if (opcion) agregar(porId.get(opcion.dataset.opcionIngrediente));
+    else if (e.target.closest('[data-ingrediente-nuevo]')) agregarNuevo();
+  });
+  seleccion.addEventListener('click', (e) => {
+    const boton = e.target.closest('[data-quitar-ingrediente]');
+    if (!boton) return;
+    elegidos.delete(boton.dataset.quitarIngrediente);
+    pintar();
+    campo.focus();
+  });
+  pintar();
+  return () => [...elegidos.values()].map((i) => i.nombre);
+}
+
 async function hojaPlatillo(id, base = {}, alGuardar) {
-  const p = id ? await api('GET', `/platillos/${id}`) : { nombre: '', tipos: ['comida', 'cena'], categoria: 'pollo', tiempo: 'medio', ingredientes: [], guarniciones: [], etiquetas: [], notas: '', calificaciones: {}, ...base };
+  const [p, catalogo] = await Promise.all([
+    id ? api('GET', `/platillos/${id}`) : { nombre: '', tipos: ['comida', 'cena'], categoria: 'pollo', tiempo: 'medio', ingredientes: [], guarniciones: [], etiquetas: [], notas: '', calificaciones: {}, ...base },
+    api('GET', '/refri'),
+  ]);
   const st = p.stats;
   const sheet = abrirSheet(`
     <div class="sheet-tit"><h2>${id ? esc(p.nombre) : 'Nuevo platillo'}</h2><button class="icono" data-cerrar>✕</button></div>
@@ -677,7 +756,13 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
       <div class="chips" id="tipos">${['desayuno', 'comida', 'cena'].map((t) => `<button type="button" class="chip ${p.tipos.includes(t) ? 'on' : ''}" data-t="${t}">${COMIDA_ICONO[t]} ${COMIDA_NOMBRE[t]}</button>`).join('')}</div>
       <label class="campo">Tipo<select name="categoria">${CATEGORIAS.map((c) => `<option value="${c}" ${p.categoria === c ? 'selected' : ''}>${CAT_ICONO[c]} ${c}</option>`).join('')}</select></label>
       <label class="campo">Tiempo<select name="tiempo">${Object.entries(TIEMPOS).map(([k, v]) => `<option value="${k}" ${p.tiempo === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-      <label class="campo">Ingredientes principales <span class="ayuda">(separados por coma)</span><textarea name="ingredientes" rows="2">${esc(p.ingredientes.join(', '))}</textarea></label>
+      <fieldset class="ingredientes-campo">
+        <legend>Ingredientes principales</legend>
+        <ul id="ingredientes-elegidos" class="ingredientes-elegidos" aria-label="Ingredientes del platillo"></ul>
+        <label class="campo">Buscar ingrediente<input type="search" id="buscar-ingrediente" maxlength="120" placeholder="Ej. ajo o pechuga" autocomplete="off"></label>
+        <ul id="opciones-ingredientes" class="opciones-ingredientes" aria-label="Ingredientes para agregar"></ul>
+        <p id="sin-opciones-ingrediente" class="ayuda" hidden>Ya está en este platillo.</p>
+      </fieldset>
       <label class="campo">Acompañamientos típicos <span class="ayuda">(arroz, frijoles, sopa…)</span><input name="guarniciones" value="${esc(p.guarniciones.join(', '))}"></label>
       <div class="chips" id="etiquetas">
         <button type="button" class="chip ${p.etiquetas.includes('invitados') ? 'on' : ''}" data-e="invitados">🎉 Bueno para invitados</button>
@@ -692,6 +777,9 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
         ? '<button type="button" class="btn sec ancho" data-restaurar style="margin-top:6px">Restaurar platillo</button>'
         : '<button type="button" class="btn peligro ancho" data-archivar style="margin-top:6px">Archivar platillo</button>' : ''}
     </form>`);
+  const iniciales = st?.ingredientes || p.ingredientes.map((nombre) => catalogo.find((i) => nombresIngrediente(i).includes(normalizar(nombre)))
+    || { id: normalizar(nombre), nombre, estado: 'revisar' });
+  const ingredientes = editarIngredientes(sheet, iniciales, catalogo);
   sheet.querySelectorAll('#tipos .chip, #etiquetas .chip').forEach((b) => b.addEventListener('click', () => b.classList.toggle('on')));
   sheet.querySelector('[data-archivar]')?.addEventListener('click', accion(async () => {
     const usos = await api('GET', `/platillos/${id}/usos-futuros`);
@@ -707,7 +795,7 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
     const f = new FormData(e.target);
     const datos = {
       nombre: f.get('nombre'), categoria: f.get('categoria'), tiempo: f.get('tiempo'),
-      ingredientes: f.get('ingredientes'), guarniciones: f.get('guarniciones'), notas: f.get('notas'),
+      ingredientes: ingredientes(), guarniciones: f.get('guarniciones'), notas: f.get('notas'),
       tipos: [...sheet.querySelectorAll('#tipos .on')].map((b) => b.dataset.t),
       etiquetas: [...sheet.querySelectorAll('#etiquetas .on')].map((b) => b.dataset.e),
     };
@@ -727,40 +815,72 @@ async function hojaPlatillo(id, base = {}, alGuardar) {
 const vistaActual = () => irA(estado.tab);
 
 // =====================================================================
-// REFRI
+// EN CASA
 // =====================================================================
-async function vistaRefri() {
+async function vistaEnCasa() {
   const app = $('#app');
-  app.innerHTML = `<div class="cabecera"><h1>Mi refri 🧊</h1></div>
-    <p class="sub" style="margin-top:-6px">Toca lo que <b>sí tienes</b> en casa.</p>
+  app.innerHTML = `<div class="cabecera"><h1>En casa 🏠</h1></div>
     <button class="btn rosa ancho" data-quehago style="margin-bottom:12px">🍳 ¿Qué hago con lo que tengo?</button>
-    <form id="f-ing" class="fila" style="margin-bottom:6px"><input class="buscar" name="n" aria-label="Otro ingrediente" placeholder="Agregar otro ingrediente…" maxlength="120" required style="margin:0"><button class="btn chico" aria-label="Agregar ingrediente">+</button></form>
-    <div id="refri"><div class="cargando">Cargando…</div></div>`;
+    <form id="f-ing" class="buscar-en-casa">
+      <label class="campo" for="buscar-en-casa">Buscar o agregar ingrediente</label>
+      <div class="fila">
+        <input class="buscar" type="search" id="buscar-en-casa" name="n" placeholder="Ej. ajo" maxlength="120" autocomplete="off">
+        <button type="submit" class="btn sec chico" data-agregar-ing hidden>Agregar</button>
+      </div>
+    </form>
+    <div id="ingredientes-en-casa"><div class="cargando">Cargando…</div></div>`;
+  const campo = $('#buscar-en-casa', app);
+  const lista = $('#ingredientes-en-casa', app);
+  const agregar = $('[data-agregar-ing]', app);
   const items = await api('GET', '/refri');
-  if (estado.tab !== 'refri') return;
-  const secciones = { carniceria: '🥩 Carnicería', verdura: '🥬 Verdura y fruta', super: '🛒 Súper' };
-  $('#refri').innerHTML = Object.entries(secciones).map(([k, t]) => {
-    const l = items.filter((i) => i.seccion === k);
-    return l.length ? `<h3>${t}</h3><div class="chips">${l.map((i) => `<button class="chip verde ${i.tengo ? 'on' : ''}" aria-pressed="${i.tengo}" data-ing="${esc(i.nombre)}">${esc(i.nombre)}</button>`).join('')}</div>` : '';
-  }).join('');
-  $('#refri').querySelectorAll('[data-ing]').forEach((b) => b.addEventListener('click', accion(async () => {
-    const on = !b.classList.contains('on');
-    await api('POST', '/refri', on ? { tengo: [b.dataset.ing] } : { seAcabo: [b.dataset.ing] });
-    b.classList.toggle('on', on);
-    b.setAttribute('aria-pressed', String(on));
-  })));
+  if (!lista.isConnected) return;
+  const porId = new Map(items.map((i) => [i.id, i]));
+  const secciones = { carniceria: 'Carnes y pescados', verdura: 'Verduras y frutas', super: 'Otros ingredientes' };
+  const camposEstado = { tengo: 'tengo', revisar: 'porRevisar', falta: 'seAcabo' };
+  function pintar() {
+    const texto = normalizar(campo.value);
+    agregar.hidden = !texto || items.some((i) => nombresIngrediente(i).includes(texto));
+    const visibles = items.filter((i) => nombresIngrediente(i).some((n) => n.includes(texto)));
+    lista.innerHTML = Object.entries(secciones).map(([k, titulo]) => {
+      const grupo = visibles.filter((i) => i.seccion === k);
+      if (!grupo.length) return '';
+      return `<div class="tarjeta">
+        <h3 class="titulo-grupo-ingredientes">${titulo}</h3>
+        <ul class="lista-en-casa">${grupo.map((i) => `<li class="ingrediente-en-casa">
+          <label for="casa-${esc(encodeURIComponent(i.id))}">${esc(i.nombre)}</label>
+          <select id="casa-${esc(encodeURIComponent(i.id))}" class="estado-en-casa estado-ing-${i.estado}" data-estado-ingrediente="${esc(i.id)}" aria-label="Disponibilidad de ${esc(i.nombre)}">
+            ${Object.entries(ESTADOS_INGREDIENTE).map(([valor, etiqueta]) => `<option value="${valor}" ${i.estado === valor ? 'selected' : ''}>${etiqueta}</option>`).join('')}
+          </select>
+        </li>`).join('')}</ul>
+      </div>`;
+    }).join('') || '<p class="ayuda">No hay ingredientes con ese nombre.</p>';
+    lista.querySelectorAll('[data-estado-ingrediente]').forEach((select) => select.addEventListener('change', accion(async () => {
+      const ingrediente = porId.get(select.dataset.estadoIngrediente);
+      const siguiente = select.value;
+      try { await api('POST', '/refri', { [camposEstado[siguiente]]: [ingrediente.nombre] }); }
+      catch (error) { select.value = ingrediente.estado; throw error; }
+      select.classList.replace(`estado-ing-${ingrediente.estado}`, `estado-ing-${siguiente}`);
+      ingrediente.estado = siguiente;
+      if (lista.isConnected && !select.isConnected) pintar();
+      toast(`${ingrediente.nombre}: ${ESTADOS_INGREDIENTE[siguiente]}`);
+    })));
+  }
+  campo.addEventListener('input', pintar);
+  pintar();
   $('#f-ing').addEventListener('submit', accion(async (e) => {
-    e.preventDefault();
-    const n = e.target.n.value.trim();
-    if (!n) return;
-    await api('POST', '/refri', { tengo: [n] }); if (estado.tab === 'refri') await vistaRefri();
+    const n = campo.value.trim();
+    if (!n || agregar.hidden) return;
+    await api('POST', '/refri', { tengo: [n] });
+    if (estado.tab === 'refri') await vistaEnCasa();
+    toast(`${n}: Tengo`);
   }));
   app.querySelector('[data-quehago]').addEventListener('click', accion(async () => {
     const res = await api('GET', '/refri/que-hago?comida=comida');
     const sheet = abrirSheet(`<div class="sheet-tit"><h2>Con lo que tienes…</h2><button class="icono" data-cerrar>✕</button></div>
       ${res.length ? res.map((r) => `<div class="tarjeta"><div class="fila"><div class="flex"><b>${esc(r.platillo)}</b>
-        <div class="ayuda">Tienes ${r.tienes} de ${r.total}${r.faltan.length ? ` · falta: ${esc(r.faltan.join(', '))}` : ' · ¡tienes todo! 🎉'}</div></div>
-        <button class="btn chico" data-hoy="${r.id}" aria-label="Elegir ${esc(r.platillo)} para hoy">Hoy</button></div></div>`).join('') : '<p class="vacio-grande">Marca primero lo que tienes en el refri 🙂</p>'}`);
+        <div class="ayuda">Tienes ${r.tienes} de ${r.total} ingredientes</div>
+        ${resumenIngredientes(r)}</div>
+        <button class="btn chico" data-hoy="${r.id}" aria-label="Elegir ${esc(r.platillo)} para hoy">Hoy</button></div></div>`).join('') : '<p class="vacio-grande">Marca primero lo que tienes en casa.</p>'}`);
     sheet.querySelectorAll('[data-hoy]').forEach((b) => b.addEventListener('click', accion(async () => {
       const sem = await api('GET', '/semana');
       estado.hoy = sem.hoy;
@@ -789,18 +909,24 @@ async function vistaSuper() {
   const fechaMostrada = l.semana;
   const iconos = { carniceria: '🥩', verdura: '🥬', super: '🛒' };
   const total = Object.values(l.secciones).flat();
+  const hayPorRevisar = total.some((i) => !i.marcado && !i.extra && i.estadoCasa === 'revisar');
   app.innerHTML = `<div class="cabecera"><h1>Lista del súper</h1>${navigator.share ? '<button class="icono" data-compartir aria-label="Compartir">📤</button>' : ''}</div>
-    <p class="sub" style="margin-top:-6px">Semana del ${diaNum(l.semana)} ${mesCorto(l.semana)} · sin lo que ya tienes en el refri</p>
+    <p class="sub" style="margin-top:-6px">Semana del ${diaNum(l.semana)} ${mesCorto(l.semana)}${hayPorRevisar ? '. Comprueba en casa lo marcado como «Por revisar».' : ''}</p>
     <form id="f-extra" class="fila" style="margin-bottom:10px">
       <input class="buscar" name="n" aria-label="Artículo extra" placeholder="Agregar (papel de baño, leche…)" maxlength="120" required style="margin:0">
       <button class="btn chico" aria-label="Agregar artículo">+</button>
     </form>
     <label class="extra-alimento"><input type="checkbox" name="alimento" form="f-extra"> Es un alimento</label>
-    <div class="armar"><button class="btn sec" data-al-refri hidden>Pasar alimentos marcados al refri</button></div>
+    <div class="armar"><button class="btn sec" data-al-refri hidden>Pasar alimentos a «En casa»</button></div>
     ${total.length ? Object.entries(l.secciones).map(([k, items]) => items.length ? `<div class="tarjeta"><h3 style="margin-top:0">${iconos[k]} ${esc(l.nombresSecciones[k])}</h3>
       ${items.map((i) => `<div class="compra ${i.marcado ? 'marcado' : ''}">
         <input type="checkbox" id="compra-${esc(encodeURIComponent(i.id))}" data-c="${esc(i.nombre)}" ${i.marcado ? 'checked' : ''}>
-        <label for="compra-${esc(encodeURIComponent(i.id))}" class="flex"><span class="nombre">${esc(i.nombre)}</span>${i.para ? `<span class="det">${esc(i.para.join(', '))}</span>` : ''}</label>
+        <label for="compra-${esc(encodeURIComponent(i.id))}" class="flex">
+          <span class="nombre">${esc(i.nombre)}</span>
+          ${!i.extra && i.estadoCasa ? estadoIngredienteHtml(i.estadoCasa) : ''}
+          ${i.para?.length ? `<span class="det">${esc(i.para.join(', '))}</span>` : ''}
+        </label>
+        ${!i.extra && i.estadoCasa === 'revisar' ? `<button type="button" class="btn sec chico tengo-compra" data-tengo-compra="${esc(i.nombre)}" aria-label="Ya tengo ${esc(i.nombre)}">Ya lo tengo</button>` : ''}
         ${i.extra ? `<button type="button" class="quitar" data-q="${esc(i.nombre)}" aria-label="Quitar ${esc(i.nombre)}">✕</button>` : ''}
       </div>`).join('')}</div>` : '').join('') : '<div class="vacio-grande">Planea tu semana y aquí aparece lo que hay que comprar 🛒</div>'}`;
   const pasar = app.querySelector('[data-al-refri]');
@@ -821,9 +947,16 @@ async function vistaSuper() {
   pasar.addEventListener('click', accion(async () => {
     await marcas;
     const { agregados } = await api('POST', '/compras/al-refri', { fecha: fechaMostrada });
-    toast(agregados.length ? `Al refri: ${agregados.join(', ')}` : 'Marca primero los alimentos que compraste.');
+    toast(agregados.length ? `Guardado en En casa: ${agregados.join(', ')}` : 'Marca primero los alimentos que compraste.');
     if (estado.tab === 'super') await vistaSuper();
   }));
+  app.querySelectorAll('[data-tengo-compra]').forEach((b) => b.addEventListener('click', accion(async () => {
+    await marcas;
+    const nombre = b.dataset.tengoCompra;
+    await api('POST', '/refri', { tengo: [nombre] });
+    if (estado.tab === 'super') await vistaSuper();
+    toast(`${nombre}: Tengo`);
+  })));
   app.querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', accion(async () => {
     await api('DELETE', `/compras/${encodeURIComponent(b.dataset.q)}?fecha=${fechaMostrada}`);
     if (estado.tab === 'super') await vistaSuper();
@@ -838,7 +971,8 @@ async function vistaSuper() {
   }));
   app.querySelector('[data-compartir]')?.addEventListener('click', () => {
     const texto = Object.entries(l.secciones).filter(([, i]) => i.some((x) => !x.marcado))
-      .map(([k, i]) => `${iconos[k]} ${l.nombresSecciones[k]}\n${i.filter((x) => !x.marcado).map((x) => `- ${x.nombre}`).join('\n')}`).join('\n\n');
+      .map(([k, i]) => `${iconos[k]} ${l.nombresSecciones[k]}\n${i.filter((x) => !x.marcado)
+        .map((x) => `- ${x.nombre}${!x.extra && x.estadoCasa === 'revisar' ? ' (por revisar en casa)' : ''}`).join('\n')}`).join('\n\n');
     navigator.share({ title: 'Lista del súper', text: texto }).catch(() => {});
   });
 }

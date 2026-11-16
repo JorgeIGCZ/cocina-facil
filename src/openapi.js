@@ -56,14 +56,14 @@ export function openapi(servidor) {
       },
       '/api/sugerencias': { get: op('Sugerencias', { parameters: [q('fecha', '', fecha), q('comida', ''), q('cantidad', '', { type: 'integer' }), q('rapido', '', { type: 'boolean' }), q('categoria', ''), q('para', 'Nombres separados por coma, "niños" o "adultos"')] }) },
       '/api/historial': { get: op('Historial', { parameters: [q('desde', '', fecha), q('hasta', '', fecha), q('platillo', '')] }) },
-      '/api/refri': { get: op('Ingredientes y si los hay'), post: op('Actualizar refri', { requestBody: body({ tengo: lista, seAcabo: lista }) }) },
+      '/api/refri': { get: op('Ingredientes que hay en casa, que faltan o que están por revisar'), post: op('Actualizar lo que hay en casa', { requestBody: body({ tengo: lista, seAcabo: lista, porRevisar: lista }) }) },
       '/api/refri/que-hago': { get: op('Qué hacer con lo que hay', { parameters: [q('comida', '')] }) },
       '/api/compras': {
         get: op('Lista del súper de la semana', { parameters: [q('fecha', '', fecha)] }),
         post: op('Agregar extra a la lista', { requestBody: body({ nombre: { type: 'string' }, seccion: { type: 'string', enum: Object.keys(SECCIONES) }, fecha, alimento: { type: 'boolean' } }, ['nombre']) }),
       },
       '/api/compras/marcar': { post: op('Tachar/destachar', { requestBody: body({ nombre: { type: 'string' }, marcado: { type: 'boolean' }, fecha }, ['nombre']) }) },
-      '/api/compras/al-refri': { post: op('Pasar alimentos marcados al refri', { requestBody: body({ fecha }) }) },
+      '/api/compras/al-refri': { post: op('Pasar alimentos marcados a En casa', { requestBody: body({ fecha }) }) },
     },
   };
 }
