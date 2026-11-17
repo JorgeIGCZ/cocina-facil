@@ -634,7 +634,7 @@ async function vistaPlatillos() {
   const app = $('#app');
   app.innerHTML = `
     <div class="cabecera"><h1>Mis platillos</h1><button class="btn chico" data-nuevo>+ Nuevo</button></div>
-    <input class="buscar" id="q" aria-label="Buscar por nombre o ingrediente" placeholder="🔍 Buscar por nombre o ingrediente" value="${esc(filtroPlat.texto)}">
+    <input type="search" class="buscar" id="q" aria-label="Buscar por nombre o ingrediente" placeholder="🔍 Buscar por nombre o ingrediente" value="${esc(filtroPlat.texto)}">
     <div class="chips scroll" id="f-tipo">
       <button class="chip ${!filtroPlat.tipo && !filtroPlat.categoria ? 'on' : ''}" data-f="">Todos</button>
       <button class="chip ${filtroPlat.tipo === 'desayuno' ? 'on' : ''}" data-f="tipo:desayuno">☀️ Desayunos</button>
@@ -655,26 +655,58 @@ async function vistaPlatillos() {
     if (k) filtroPlat[k] = v;
     irA('platillos');
   }));
+  let pintar;
+  $('#q', app).addEventListener('input', (e) => { filtroPlat.texto = e.target.value; pintar?.(); });
   const orden = app.querySelector('#orden');
   orden.value = lsGet('orden') || 'nombre';
-  const todos = await api('GET', `/platillos?${new URLSearchParams({ tipo: filtroPlat.tipo, categoria: filtroPlat.categoria, archivados: soloArchivados })}`);
+  const todos = await api('GET', '/platillos?archivados=1');
   if (estado.tab !== 'platillos' || solicitud !== solicitudPlatillos) return;
-  const pintar = () => {
-    const t = normalizar(filtroPlat.texto);
-    const l = todos.filter((p) => (!soloArchivados || p.archivado) && (!t || normalizar(p.nombre).includes(t) || p.ingredientes.some((i) => normalizar(i).includes(t))));
+  const lista = $('#lista', app);
+  pintar = () => {
+    const nombreBuscado = filtroPlat.texto.trim();
+    const t = normalizar(nombreBuscado);
+    const l = todos.filter((p) => Boolean(p.archivado) === soloArchivados
+      && (!filtroPlat.tipo || p.tipos.includes(filtroPlat.tipo))
+      && (!filtroPlat.categoria || normalizar(p.categoria) === normalizar(filtroPlat.categoria))
+      && (!t || normalizar(p.nombre).includes(t) || p.ingredientes.some((i) => normalizar(i).includes(t))));
+    if (!l.length) {
+      const existente = t && todos.find((p) => normalizar(p.nombre) === t);
+      const texto = existente
+        ? `«${esc(existente.nombre)}» ${existente.archivado ? 'está archivado.' : 'está en tus platillos activos.'}`
+        : 'No encontré platillos.';
+      const accionVacio = existente ? 'Ver platillo' : `Agregar «${esc(nombreBuscado)}»`;
+      lista.innerHTML = `<div class="vacio-grande"><p>${texto}</p>
+        ${t ? `<button type="button" class="btn" data-busqueda-vacia>${accionVacio}</button>` : ''}
+      </div>`;
+      lista.querySelector('[data-busqueda-vacia]')?.addEventListener('click', accion(() => {
+        if (existente) return hojaPlatillo(existente.id);
+        const base = {
+          nombre: nombreBuscado,
+          ...(filtroPlat.tipo ? { tipos: [filtroPlat.tipo] } : {}),
+          ...(filtroPlat.categoria ? { categoria: filtroPlat.categoria } : {}),
+        };
+        return hojaPlatillo(null, base, async (guardado) => {
+          soloArchivados = false;
+          filtroPlat = { texto: guardado.nombre, tipo: '', categoria: '' };
+          cerrarSheet();
+          toast('Platillo guardado');
+          await irA('platillos');
+        });
+      }));
+      return;
+    }
     const o = orden.value;
     if (o === 'puntaje') l.sort((a, b) => (b.stats.puntaje || 0) - (a.stats.puntaje || 0));
     if (o === 'veces') l.sort((a, b) => b.stats.veces - a.stats.veces);
     if (o === 'olvidados') l.sort((a, b) => (b.stats.diasDesde ?? 999) - (a.stats.diasDesde ?? 999) || a.stats.veces - b.stats.veces);
-    $('#lista').innerHTML = l.length ? l.map((p) => `<button class="lista-item" data-id="${p.id}">
+    lista.innerHTML = l.map((p) => `<button class="lista-item" data-id="${p.id}">
       <span class="cat">${CAT_ICONO[p.categoria] || '🍽️'}</span>
       <span class="flex"><div class="nombre">${esc(p.nombre)}</div>
         <div class="det">${p.stats.veces ? `${p.stats.veces} ${p.stats.veces === 1 ? 'vez' : 'veces'}` : 'Nuevo'}${p.stats.diasDesde != null ? ` · hace ${p.stats.diasDesde} días` : ''}${p.etiquetas.includes('invitados') ? ' · 🎉' : ''}</div></span>
       ${p.stats.puntaje ? `<span class="puntaje">★ ${p.stats.puntaje}</span>` : '<span class="ayuda">sin ★</span>'}
-    </button>`).join('') : '<div class="vacio-grande">No encontré platillos 🤔</div>';
-    $('#lista').querySelectorAll('[data-id]').forEach((b) => b.addEventListener('click', accion(() => hojaPlatillo(b.dataset.id))));
+    </button>`).join('');
+    lista.querySelectorAll('[data-id]').forEach((b) => b.addEventListener('click', accion(() => hojaPlatillo(b.dataset.id))));
   };
-  app.querySelector('#q').addEventListener('input', (e) => { filtroPlat.texto = e.target.value; pintar(); });
   orden.addEventListener('change', () => { lsSet('orden', orden.value); pintar(); });
   pintar();
 }
